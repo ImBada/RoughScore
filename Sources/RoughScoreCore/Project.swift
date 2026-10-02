@@ -50,10 +50,11 @@ public struct AnalysisSummary: Codable, Equatable, Sendable {
     public var bars: [Double]
     public var sections: [TimeSpan]
     public var otherInstrumentRanges: [TimeSpan]
+    public var provenance: AnalysisProvenance?
     public init(bpm: Double? = nil, key: String? = nil, beats: [Double] = [], bars: [Double] = [],
-                sections: [TimeSpan] = [], otherInstrumentRanges: [TimeSpan] = []) {
+                sections: [TimeSpan] = [], otherInstrumentRanges: [TimeSpan] = [], provenance: AnalysisProvenance? = nil) {
         self.bpm = bpm; self.key = key; self.beats = beats; self.bars = bars
-        self.sections = sections; self.otherInstrumentRanges = otherInstrumentRanges
+        self.sections = sections; self.otherInstrumentRanges = otherInstrumentRanges; self.provenance = provenance
     }
 }
 
@@ -68,6 +69,9 @@ public struct ScoreProject: Codable, Equatable, Sendable {
     public var title: String
     public var audioPath: String?
     public var duration: Double
+    // Optional v1 extensions: old documents decode without fabricated identity or pitch octaves.
+    public var assets: [AudioAsset]?
+    public var tuningDefinition: TuningDefinition?
     public var tuning: [String] = ["E", "B", "G", "D", "A", "E"]
     public var events: [TabEvent]
     public var analyses: [String: AnalysisSummary]
@@ -81,12 +85,26 @@ public struct ScoreProject: Codable, Equatable, Sendable {
         guard version == 1 else { throw ProjectError.unsupportedVersion }
         guard duration.isFinite, duration > 0, duration <= 86_400,
               tuning.count == 6, Set(events.map(\.id)).count == events.count else { throw ProjectError.invalidData }
+        if let assets {
+            guard Set(assets.map(\.id)).count == assets.count,
+                  assets.filter({ $0.role == .original }).count == 1 else { throw ProjectError.invalidData }
+            for asset in assets { _ = try asset.validated() }
+            if let original = originalAsset, original.reference.kind == .external,
+               original.reference.path != audioPath { throw ProjectError.invalidData }
+        }
+        _ = try tuningDefinition?.validated()
         for event in events {
             guard event.time.isFinite, event.time >= 0, event.time < duration,
                   (1...6).contains(event.string), event.fret.map({ (0...24).contains($0) }) ?? true
             else { throw ProjectError.invalidData }
         }
-        for summary in analyses.values {
+        for (channel, summary) in analyses {
+            if let provenance = summary.provenance {
+                _ = try provenance.validated()
+                guard provenance.channel == channel,
+                      assets?.contains(where: { $0.id == provenance.assetID && $0.identity == provenance.identity }) == true
+                else { throw ProjectError.invalidData }
+            }
             guard summary.bpm.map({ $0.isFinite && $0 > 0 }) ?? true,
                   (summary.beats + summary.bars).allSatisfy({ $0.isFinite && $0 >= 0 && $0 <= duration }),
                   (summary.sections + summary.otherInstrumentRanges).allSatisfy({
@@ -94,6 +112,53 @@ public struct ScoreProject: Codable, Equatable, Sendable {
                   }) else { throw ProjectError.invalidData }
         }
         return self
+    }
+
+
+    /// Offline notes remain available; only summaries with known, uncontradicted source provenance survive.
+    public func invalidatingUnverifiedAnalysis(fingerprint: String?) -> Self {
+        var candidate = self
+        let originalID = originalAsset?.id
+        candidate.analyses = analyses.filter { _, summary in
+            guard let provenance = summary.provenance else { return false }
+            if provenance.assetID == originalID, let fingerprint {
+                return provenance.identity.sha256 == fingerprint
+            }
+            return true // Missing/unreadable media does not disprove a known source snapshot.
+        }
+        if let fingerprint, let index = candidate.assets?.firstIndex(where: { $0.role == .original }),
+           candidate.assets?[index].identity?.sha256 != fingerprint {
+            candidate.assets?[index].identity = nil
+        }
+        return candidate
+    }
+
+    public func soundingMIDI(string: Int, fret: Int) -> Int? {
+        guard (1...6).contains(string), (0...24).contains(fret) else { return nil }
+        let definition = tuningDefinition ?? (tuning == ["E", "B", "G", "D", "A", "E"] ? TuningDefinition() : nil)
+        guard let definition, (try? definition.validated()) != nil else { return nil }
+        let value = definition.openMIDIPitches[string - 1] + definition.capo + fret
+        return value <= 127 ? value : nil
+    }
+
+    public var originalAsset: AudioAsset? { assets?.first { $0.role == .original } }
+
+    /// Relink never changes manual annotations. Only proven matching derived data may survive.
+    public func relinkingOriginal(path: String, identity: AudioContentIdentity?, duration: Double) throws -> Self {
+        var candidate = self
+        let previous = originalAsset
+        let original = AudioAsset(id: previous?.id ?? UUID(), reference: AudioReference(path: path), identity: identity)
+        let sameContent = identity != nil && previous?.identity == identity
+        candidate.analyses = sameContent ? analyses.filter { channel, summary in
+            guard let p = summary.provenance else { return false }
+            return p.assetID == original.id && p.identity == identity && p.channel == channel &&
+                (summary.beats + summary.bars).allSatisfy { $0 <= duration } &&
+                (summary.sections + summary.otherInstrumentRanges).allSatisfy { $0.end <= duration }
+        } : [:]
+        // Imported files are independently owned. Future derived/model assets must also carry proven provenance.
+        candidate.assets = [original] + (assets ?? []).filter { $0.role != .original }
+        candidate.duration = duration; candidate.audioPath = path
+        return try candidate.validated()
     }
 
     public static var demo: Self {

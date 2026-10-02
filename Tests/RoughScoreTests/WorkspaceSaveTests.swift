@@ -59,8 +59,13 @@ struct WorkspaceSaveTests {
     @Test func relinkThenInputUndoKeepsMetadataDirtyUntilDiskMatches() async throws {
         let f = try SaveFixture(); defer { f.clean() }
         let manual = TabEvent(time: 1.213456789, lane: .right, string: 3, memo: "manual unknown")
-        let disk = ScoreProject(title: "saved", audioPath: "/missing/old.caf", duration: 20,
-                                events: [manual], analyses: ["stereo": AnalysisSummary(bpm: 123)])
+        let identity = AudioContentIdentity(sha256: String(repeating: "a", count: 64), channelCount: 1,
+                                            sampleRate: 8_000, frameCount: 160_000)
+        let asset = AudioAsset(reference: AudioReference(path: "/missing/old.caf"), identity: identity)
+        var disk = ScoreProject(title: "saved", audioPath: asset.reference.path, duration: 20,
+                                events: [manual], analyses: ["stereo": AnalysisSummary(bpm: 123, provenance:
+                                    AnalysisProvenance(assetID: asset.id, identity: identity, channel: "stereo", analyzerVersion: "historical-test-v1"))])
+        disk.assets = [asset] // Proven historical analysis may remain available while its source is missing.
         try f.write(disk)
         let audio = try f.audio(duration: 21)
         var services = f.services(); services.prepare = { _, _ in audio }

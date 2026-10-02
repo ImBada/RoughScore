@@ -241,7 +241,9 @@ struct WorkspaceTransitionTests {
         let audio = try f.prepared(url)
         await f.fake.finish(url, result: .success(audio))
         #expect(await task.value)
-        #expect(workspace.project == saved && workspace.hasSaveLocation && !workspace.dirty)
+        #expect(workspace.project.events == saved.events && workspace.hasSaveLocation)
+        #expect(workspace.project.audioPath == saved.audioPath)
+        #expect(workspace.dirty) // First preparation records source metadata, not a fabricated disk baseline.
         #expect(workspace.selectedID == nil && !workspace.canUndo)
     }
 
@@ -489,7 +491,7 @@ struct WorkspaceTransitionTests {
         #expect(persisted == before)
     }
 
-    @Test func injectedPlayerFailureKeepsSaveDestinationAndCleansOnlyNewAudio() async throws {
+    @Test func decodedProjectWithPlayerFailureOpensOfflineAndCleansPreparedAudio() async throws {
         let f = try TransitionFixture(); defer { f.clean() }
         let oldURL = try f.audio("old-player"), newURL = try f.audio("failed-player")
         let oldProjectURL = f.root.appendingPathComponent("old.roughscore")
@@ -509,23 +511,23 @@ struct WorkspaceTransitionTests {
         await f.fake.started(oldURL)
         let oldAudio = try f.prepared(oldURL)
         await f.fake.finish(oldURL, result: .success(oldAudio)); #expect(await initial.value)
-        // No modal discard prompt: this saved project is still clean and has readable offline TAB.
+        workspace.save() // Persist newly established source metadata before replacing the document.
         let replacement = try #require(workspace.loadProject(at: newProjectURL))
         await f.fake.started(newURL)
         let staged = try f.prepared(newURL)
         await f.fake.finish(newURL, result: .success(staged))
-        #expect(!(await replacement.value))
-        #expect(workspace.error == "Injected player initialization failure")
-        #expect(workspace.project == old && !workspace.dirty && workspace.hasSaveLocation)
-        #expect(workspace.prepared?.directory == oldAudio.directory)
-        #expect(FileManager.default.fileExists(atPath: oldAudio.directory.path))
+        #expect(await replacement.value)
+        #expect(workspace.audioConnection.contains("Injected player initialization failure"))
+        #expect(workspace.project == new && !workspace.dirty && workspace.hasSaveLocation)
+        #expect(workspace.prepared == nil && !workspace.playing && !workspace.isDemo)
+        #expect(!FileManager.default.fileExists(atPath: oldAudio.directory.path))
         #expect(!FileManager.default.fileExists(atPath: staged.directory.path))
         #expect(FileManager.default.fileExists(atPath: oldURL.path) && FileManager.default.fileExists(atPath: newURL.path))
         workspace.addEvent(time: 1.213, string: 6); workspace.inputDigit(7, at: 100)
         let retained = workspace.project
         workspace.save()
-        #expect(try JSONDecoder().decode(ScoreProject.self, from: Data(contentsOf: oldProjectURL)) == retained)
-        #expect(try Data(contentsOf: newProjectURL) == newDocumentBytes)
+        #expect(try JSONDecoder().decode(ScoreProject.self, from: Data(contentsOf: newProjectURL)) == retained)
+        #expect(try Data(contentsOf: newProjectURL) != newDocumentBytes)
     }
 
     @Test func cancellationDuringPlayerInitializationStillCannotCommit() async throws {

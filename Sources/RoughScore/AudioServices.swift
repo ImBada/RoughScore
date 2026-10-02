@@ -1,5 +1,6 @@
 import AVFoundation
 import Foundation
+import CryptoKit
 import RoughScoreCore
 #if canImport(MusicUnderstanding)
 import MusicUnderstanding
@@ -14,17 +15,19 @@ struct PreparedAudio: Sendable {
     let isMono: Bool
     let leftPeaks: [Float]
     let rightPeaks: [Float]
+    var identity: AudioContentIdentity? = nil
     func url(for source: ListeningSource) -> URL {
         switch source { case .stereo: original; case .left: left; case .right: right }
     }
 }
 
 enum AudioIssue: LocalizedError {
-    case unsupported, tooLong, unavailable
+    case unsupported, tooLong, unavailable, sourceChanged
     var errorDescription: String? {
         switch self {
         case .unsupported: "비어 있거나 지원하지 않는 오디오입니다. 모노 또는 스테레오 파일을 선택하세요."
         case .tooLong: "초안에서는 1시간 이내의 오디오를 사용할 수 있습니다."
+        case .sourceChanged: "오디오 준비 중 원본 내용이 바뀌었습니다. 다시 연결해 주세요."
         case .unavailable: "Music Understanding 분석에는 macOS 27과 해당 SDK가 필요합니다. TAB 편집과 재생은 사용할 수 있습니다."
         }
     }
@@ -36,6 +39,7 @@ enum AudioPreparation {
         let task = Task.detached(priority: .userInitiated) {
             try Task.checkCancellation()
             await progress(0)
+            let fingerprint = try contentFingerprint(url)
             let file = try AVAudioFile(forReading: url, commonFormat: .pcmFormatFloat32, interleaved: false)
             let format = file.processingFormat
             guard (1...2).contains(format.channelCount), file.length > 0,
@@ -78,14 +82,37 @@ enum AudioPreparation {
                     await progress(Double(offset) / Double(file.length))
                 }
                 try Task.checkCancellation()
+                guard try contentFingerprint(url) == fingerprint else { throw AudioIssue.unsupported }
                 return PreparedAudio(original: url, left: leftURL, right: rightURL, directory: directory,
                                      duration: duration, isMono: format.channelCount == 1,
-                                     leftPeaks: leftPeaks, rightPeaks: rightPeaks)
+                                     leftPeaks: leftPeaks, rightPeaks: rightPeaks,
+                                     identity: AudioContentIdentity(sha256: fingerprint, channelCount: Int(format.channelCount),
+                                         sampleRate: format.sampleRate, frameCount: file.length))
             } catch {
                 try? FileManager.default.removeItem(at: directory)
                 throw error
             }
         }
+        return try await withTaskCancellationHandler { try await task.value } onCancel: { task.cancel() }
+    }
+
+    /// Hash in bounded chunks and cooperate with cancellation; never read user fixture paths implicitly.
+    static func contentFingerprint(_ url: URL) throws -> String {
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+        var hash = SHA256()
+        while true {
+            try Task.checkCancellation()
+            guard let data = try handle.read(upToCount: 1_048_576), !data.isEmpty else { break }
+            hash.update(data: data)
+        }
+        return hash.finalize().map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// Async callers propagate cancellation to the bounded reader instead of leaving detached hashing running.
+    static func fingerprint(_ url: URL) async throws -> String {
+        try Task.checkCancellation()
+        let task = Task.detached { try contentFingerprint(url) }
         return try await withTaskCancellationHandler { try await task.value } onCancel: { task.cancel() }
     }
 
@@ -101,7 +128,7 @@ enum AudioPreparation {
         for channel in 0..<2 { channels[channel].initialize(repeating: 0, count: count) }
         for event in project.events {
             try Task.checkCancellation()
-            guard let fret = event.fret, let midi = TabMath.midi(string: event.string, fret: fret) else { continue }
+            guard let fret = event.fret, let midi = project.soundingMIDI(string: event.string, fret: fret) else { continue }
             let frequency = 440 * pow(2, Double(midi - 69) / 12)
             let channel = event.lane == .left ? 0 : 1
             let start = Int(event.time * sampleRate)
