@@ -163,6 +163,74 @@ struct AudioIdentityTests {
         }
     }
 
+    @Test func successfulPlayerCannotActivateDifferentBytesThanPreparedChannels() async throws {
+        let f = try IdentityFixture(); defer { f.clean() }
+        let original = try f.audio("valid-player-race")
+        let audio = try await AudioPreparation.prepare(original)
+        defer { try? FileManager.default.removeItem(at: audio.directory) }
+        let identity = try #require(audio.identity)
+        var project = try ScoreProject(title: "valid player race", duration: 20, events: f.manual).relinkingOriginal(
+            path: original.path, identity: identity, duration: 20)
+        let asset = try #require(project.originalAsset)
+        project.analyses["stereo"] = AnalysisSummary(bpm: 120, beats: [1], provenance: AnalysisProvenance(
+            assetID: asset.id, identity: identity, channel: "stereo", analyzerVersion: "actual-source-test-v1"))
+        let doc = try f.document(project)
+        var services = f.services()
+        services.makePlayer = { url in
+            _ = try f.audio("valid-player-race", value: 0.25)
+            let player = try AVAudioPlayer(contentsOf: url)
+            #expect(player.prepareToPlay()) // A real valid replacement, rather than an injected error.
+            return player
+        }
+        let workspace = Workspace(services: services); defer { workspace.shutdown() }
+        #expect(await workspace.loadProject(at: doc)?.value == true)
+        #expect(try AudioPreparation.contentFingerprint(original) != identity.sha256)
+        #expect(workspace.project.events == project.events && workspace.project.duration == project.duration)
+        #expect(workspace.prepared == nil && workspace.project.analyses.isEmpty)
+        #expect(workspace.project.originalAsset?.identity == nil && workspace.dirty)
+        workspace.save()
+        let saved = try JSONDecoder().decode(ScoreProject.self, from: Data(contentsOf: doc)).validated()
+        #expect(saved == workspace.project && saved.analyses.isEmpty && !workspace.dirty)
+    }
+
+    @Test func playerFailureAfterPreparationRechecksActualReplacementBytes() async throws {
+        let f = try IdentityFixture(); defer { f.clean() }
+        let original = try f.audio("player-race")
+        let audio = try await AudioPreparation.prepare(original)
+        defer { try? FileManager.default.removeItem(at: audio.directory) }
+        let identity = try #require(audio.identity)
+        var project = try ScoreProject(title: "player race", duration: 20, events: f.manual).relinkingOriginal(
+            path: original.path, identity: identity, duration: 20)
+        let asset = try #require(project.originalAsset)
+        project.analyses["stereo"] = AnalysisSummary(bpm: 120, beats: [1], provenance: AnalysisProvenance(
+            assetID: asset.id, identity: identity, channel: "stereo", analyzerVersion: "actual-source-test-v1"))
+        let doc = try f.document(project)
+        let capture = IdentityPreparedCapture()
+        let corrupt = Data("readable replacement after verified preparation".utf8)
+        var services = f.services()
+        services.prepare = { url, progress in
+            let result = try await AudioPreparation.prepare(url, progress: progress)
+            await capture.record(result.directory)
+            return result
+        }
+        services.makePlayer = { url in
+            try corrupt.write(to: original, options: .atomic)
+            return try AVAudioPlayer(contentsOf: url) // Actual corrupted-file initialization failure.
+        }
+        let workspace = Workspace(services: services); defer { workspace.shutdown() }
+        #expect(await workspace.loadProject(at: doc)?.value == true)
+        #expect(try AudioPreparation.contentFingerprint(original) != identity.sha256)
+        #expect(workspace.project.events == project.events && workspace.project.duration == project.duration)
+        #expect(workspace.prepared == nil && workspace.project.analyses.isEmpty)
+        #expect(workspace.project.originalAsset?.identity == nil && workspace.dirty)
+        let staged = try #require(await capture.directory)
+        #expect(!FileManager.default.fileExists(atPath: staged.path))
+        #expect(try Data(contentsOf: original) == corrupt) // Cleanup never deletes/changes the original.
+        workspace.save()
+        let saved = try JSONDecoder().decode(ScoreProject.self, from: Data(contentsOf: doc)).validated()
+        #expect(saved == workspace.project && saved.analyses.isEmpty && !workspace.dirty)
+    }
+
     @Test func corruptReplacementInvalidatesDerivedDataWhileKeepingOfflineTAB() async throws {
         let f = try IdentityFixture(); defer { f.clean() }
         let original = try f.audio("corrupt-replacement")
@@ -216,4 +284,9 @@ struct AudioIdentityTests {
         let relinked = try legacy.relinkingOriginal(path: "/generated/new.caf", identity: identity, duration: 20)
         #expect(relinked.analyses.isEmpty && relinked.events == legacy.events)
     }
+}
+
+private actor IdentityPreparedCapture {
+    private(set) var directory: URL?
+    func record(_ directory: URL) { self.directory = directory }
 }

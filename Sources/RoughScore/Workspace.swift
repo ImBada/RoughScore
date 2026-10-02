@@ -532,9 +532,7 @@ final class Workspace: ObservableObject {
                 guard !closed, analysisID == id, projectIdentity == identityID,
                       self.prepared?.directory == prepared.directory else { return }
                 if let identity = prepared.identity {
-                    let fingerprint = try await Task.detached {
-                        try AudioPreparation.contentFingerprint(prepared.original)
-                    }.value
+                    let fingerprint = try await AudioPreparation.fingerprint(prepared.original)
                     try Task.checkCancellation()
                     guard !closed, analysisID == id, projectIdentity == identityID,
                           fingerprint == identity.sha256 else { throw AudioIssue.unsupported }
@@ -651,9 +649,7 @@ final class Workspace: ObservableObject {
                 staged = try await stageAudio(URL(fileURLWithPath: path), preserving: loaded, operation: operation)
             } catch {
                 try requireCurrent(operation)
-                let fingerprint = try? await Task.detached {
-                    try AudioPreparation.contentFingerprint(URL(fileURLWithPath: path))
-                }.value
+                let fingerprint = try? await AudioPreparation.fingerprint(URL(fileURLWithPath: path))
                 try requireCurrent(operation)
                 staged = StagedWorkspace(project: loaded.invalidatingUnverifiedAnalysis(fingerprint: fingerprint), status: "오디오를 열지 못했습니다 · TAB은 오프라인으로 편집할 수 있습니다",
                     offlineReason: error.localizedDescription)
@@ -712,12 +708,26 @@ final class Workspace: ObservableObject {
             guard var candidate = staged else { return false }
             try requireCurrent(operation)
             let stagedPlayer: AVAudioPlayer?
-            do { stagedPlayer = try preparePlayer(for: candidate) }
+            do {
+                let readyPlayer = try preparePlayer(for: candidate)
+                if let audio = candidate.audio, let identity = audio.identity {
+                    guard try await AudioPreparation.fingerprint(audio.original) == identity.sha256
+                    else { throw AudioIssue.sourceChanged }
+                }
+                stagedPlayer = readyPlayer
+            }
             catch {
                 try requireCurrent(operation)
                 guard candidate.fromDisk, let decoded = candidate.baseline else { throw error }
+                // Playback may fail because readable bytes changed after the decoder's final hash.
+                // Recheck the current source, not the earlier PreparedAudio snapshot.
+                var fingerprint: String?
+                if let original = candidate.audio?.original {
+                    fingerprint = try? await AudioPreparation.fingerprint(original)
+                }
+                try requireCurrent(operation)
                 if let audio = candidate.audio { try? FileManager.default.removeItem(at: audio.directory) }
-                candidate.project = decoded.invalidatingUnverifiedAnalysis(fingerprint: candidate.audio?.identity?.sha256)
+                candidate.project = decoded.invalidatingUnverifiedAnalysis(fingerprint: fingerprint)
                 candidate.audio = nil
                 candidate.offlineReason = error.localizedDescription
                 candidate.status = "오디오를 열지 못했습니다 · TAB은 오프라인으로 편집할 수 있습니다"

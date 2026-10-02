@@ -22,11 +22,12 @@ struct PreparedAudio: Sendable {
 }
 
 enum AudioIssue: LocalizedError {
-    case unsupported, tooLong, unavailable
+    case unsupported, tooLong, unavailable, sourceChanged
     var errorDescription: String? {
         switch self {
         case .unsupported: "비어 있거나 지원하지 않는 오디오입니다. 모노 또는 스테레오 파일을 선택하세요."
         case .tooLong: "초안에서는 1시간 이내의 오디오를 사용할 수 있습니다."
+        case .sourceChanged: "오디오 준비 중 원본 내용이 바뀌었습니다. 다시 연결해 주세요."
         case .unavailable: "Music Understanding 분석에는 macOS 27과 해당 SDK가 필요합니다. TAB 편집과 재생은 사용할 수 있습니다."
         }
     }
@@ -106,6 +107,13 @@ enum AudioPreparation {
             hash.update(data: data)
         }
         return hash.finalize().map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// Async callers propagate cancellation to the bounded reader instead of leaving detached hashing running.
+    static func fingerprint(_ url: URL) async throws -> String {
+        try Task.checkCancellation()
+        let task = Task.detached { try contentFingerprint(url) }
+        return try await withTaskCancellationHandler { try await task.value } onCancel: { task.cancel() }
     }
 
     static func createDemo(project: ScoreProject = .demo) throws -> URL {
