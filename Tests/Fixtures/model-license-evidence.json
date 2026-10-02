@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "reviewed_on": "2026-10-03",
+  "purpose": "Model-use evidence for issue #20, separate from metric correctness and dataset licensing; no checkpoints downloaded or selected.",
+  "evidence_comment": "https://github.com/ImBada/RoughScore/issues/20#issuecomment-5959726577",
+  "demucs": {
+    "source_commit": "ef66d254cd6d558e207eeff2c4b8d053db2e77dd",
+    "model": "htdemucs_6s / 5c90dfd2-34c22ccb.th",
+    "code_license": "MIT",
+    "weight_use": "Author says provided pretrained weights are outside MIT and provided only for scientific purposes.",
+    "primary_author_statement": "https://github.com/facebookresearch/demucs/issues/327#issuecomment-1134828611",
+    "later_primary_discussion": "https://github.com/facebookresearch/demucs/issues/327#issuecomment-2156362252",
+    "model_manifest": "https://github.com/facebookresearch/demucs/blob/ef66d254cd6d558e207eeff2c4b8d053db2e77dd/demucs/remote/htdemucs_6s.yaml",
+    "status": "BLOCKED for ordinary product-use permission",
+    "caveat": "Author statement predates the six-source release; no artifact-specific broader exception found. Optional external inference or user download does not establish a broader use grant. No restricted weights installed."
+  },
+  "alternative_candidates": [
+    {
+      "name": "Meta SAM Audio small",
+      "model_repository": "https://huggingface.co/facebook/sam-audio-small",
+      "model_revision": "20b65f56888142eebe7c37448c6f6b3b32600e9b",
+      "code_repository": "https://github.com/facebookresearch/sam-audio",
+      "code_revision": "bb4c6999d2677c7402360e426afc01ddfad6dce0",
+      "license_source": "https://github.com/facebookresearch/sam-audio/blob/bb4c6999d2677c7402360e426afc01ddfad6dce0/LICENSE",
+      "license_evidence": "SAM License (19 Nov 2025) explicitly defines SAM Materials to include trained weights and grants use/reproduction/distribution/modification subject to its conditions, unlike treating code MIT as a weight-use grant. It is a custom license, not MIT/Apache and not a blanket release approval.",
+      "capability_source": "https://github.com/facebookresearch/sam-audio/blob/bb4c6999d2677c7402360e426afc01ddfad6dce0/README.md",
+      "capability": "Text-prompt target/residual sound separation; guitar prompting is a candidate to test, not a measured RoughScore guitar-specific result.",
+      "status": "CANDIDATE_WITH_EXPLICIT_WEIGHT_LICENSE; NOT_SELECTED",
+      "external_prerequisites": ["Official model repository is manually gated and requires an authorized account/access-token and license acceptance; this worker did not submit personal data or request access.", "Official examples recommend CUDA; macOS CPU/MPS latency, stereo preservation, original-time alignment and guitar-specific quality remain untested.", "Review the full custom license for the actual intended use/redistribution before selection."]
+    },
+    {
+      "name": "AudioSep",
+      "primary_repository": "https://github.com/Audio-AGI/AudioSep",
+      "license_source": "https://github.com/Audio-AGI/AudioSep/blob/main/LICENSE",
+      "status": "NOT_CLEARED_FOR_WEIGHT_USE",
+      "finding": "Primary repository code is MIT and offers text-conditioned audio separation; this limited review did not establish artifact-specific pretrained-weight terms. A presumed model repository returned HTTP 401, which is not evidence of a license. Do not replace one unsupported weight-license assumption with another."
+    }
+  ],
+  "decision": "Native/imported-stem work can proceed. No unrestricted, macOS/stereo/quality-verified guitar checkpoint was established here; SAM Audio offers an explicit broader weight license but has a real access/runtime/quality gate. An infrastructure or synthetic metric PASS is not separation completion."
+}

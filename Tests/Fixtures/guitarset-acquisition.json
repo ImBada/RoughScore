@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "dataset": "GuitarSet",
+  "version": "1.1.0",
+  "source": "https://zenodo.org/records/3371780",
+  "metadata_source": "https://zenodo.org/api/records/3371780",
+  "license": "CC-BY-4.0",
+  "license_url": "https://creativecommons.org/licenses/by/4.0/",
+  "attribution": "GuitarSet: Qingyang Xi, Rachel M. Bittner, Johan Pauwels, Xuzhou Ye and Juan P. Bello (2018), DOI 10.5281/zenodo.3371780. Derived smoke windows/reference JSON retain attribution and record crop/MIDI rounding changes.",
+  "reference_method": "Published hexaphonic-pickup-derived note_midi JAMS and pitch-contour annotations, paired with microphone audio; annotations are fallible, not independently hand-verified by RoughScore.",
+  "archives": [
+    {
+      "name": "annotation.zip",
+      "url": "https://zenodo.org/api/records/3371780/files/annotation.zip/content",
+      "size_bytes": 39132574,
+      "md5": "b39b78e63d3446f2e54ddb7a54df9b10",
+      "sha256": "8daa02e6417ccca1685feb44b135e95928ad7037e5032ecb326b5791856fda99",
+      "sha256_source": "RoughScore explicit acquisition from official Zenodo file, verified against publisher size/MD5; not a publisher-provided SHA256"
+    },
+    {
+      "name": "audio_mono-mic.zip",
+      "url": "https://zenodo.org/api/records/3371780/files/audio_mono-mic.zip/content",
+      "size_bytes": 656927981,
+      "md5": "275966d6610ac34999b58426beb119c3",
+      "sha256": "237cdc58353d25c3c9683f4565a0f1cf2db30a9051abca545a919f8f1296dc28",
+      "sha256_source": "RoughScore explicit acquisition from official Zenodo file, verified against publisher size/MD5; not a publisher-provided SHA256"
+    }
+  ],
+  "excluded_tracks": [
+    "04_BN3-154-E_comp",
+    "04_Jazz1-200-B_comp",
+    "02_Funk2-119-G_comp"
+  ],
+  "exclusion_policy": "Exclude two constant annotation shifts reported in primary issue #5 and duplicated-note track reported in issue #4; do not silently repair. Smoke selection is restricted to performer 00, distinct from these errors, and is not a representative frozen benchmark.",
+  "known_error_sources": [
+    "https://github.com/marl/GuitarSet/issues/5",
+    "https://github.com/marl/GuitarSet/issues/4"
+  ],
+  "limitations": [
+    "Acoustic recordings do not supply distorted/dual-guitar band-mix reference stems.",
+    "Basic Pitch's training configuration includes GuitarSet; evaluating that model here is not necessarily held-out evidence.",
+    "Archive MD5 is the publisher integrity checksum; fetched/derived members also receive SHA256 in the receipt."
+  ]
+}

@@ -1,0 +1,60 @@
+{
+  "schema_version": 1,
+  "dataset": "GuitarSet",
+  "version": "1.1.0",
+  "license": "CC-BY-4.0",
+  "source": "https://zenodo.org/records/3371780",
+  "attribution": "GuitarSet: Qingyang Xi, Rachel M. Bittner, Johan Pauwels, Xuzhou Ye and Juan P. Bello (2018), DOI 10.5281/zenodo.3371780. Derived smoke windows/reference JSON retain attribution and record crop/MIDI rounding changes.",
+  "archives": [
+    {
+      "name": "annotation.zip",
+      "url": "https://zenodo.org/api/records/3371780/files/annotation.zip/content",
+      "size_bytes": 39132574,
+      "md5": "b39b78e63d3446f2e54ddb7a54df9b10",
+      "sha256": "8daa02e6417ccca1685feb44b135e95928ad7037e5032ecb326b5791856fda99",
+      "publisher_checksum_verified": true
+    },
+    {
+      "name": "audio_mono-mic.zip",
+      "url": "https://zenodo.org/api/records/3371780/files/audio_mono-mic.zip/content",
+      "size_bytes": 656927981,
+      "md5": "275966d6610ac34999b58426beb119c3",
+      "sha256": "237cdc58353d25c3c9683f4565a0f1cf2db30a9051abca545a919f8f1296dc28",
+      "publisher_checksum_verified": true
+    }
+  ],
+  "members": [
+    {
+      "track": "00_BN3-119-G_solo",
+      "annotation_member": "00_BN3-119-G_solo.jams",
+      "annotation_sha256": "5c64a85cce813c593d957f50bed8244f4eb539f0bd97d97fd7d18cd3206247ad",
+      "audio_member": "00_BN3-119-G_solo_mic.wav",
+      "audio_member_sha256": "5593591eb81e6ef7a922b2286536cc444461eb02eec64825a909d5b26ca283da",
+      "derived_input_sha256": "8b409d4017f22aeba4a909d3f71cf10c7e3c5cc909364b68ff7033c0a6511166",
+      "reference_sha256": "32c05911af9227251860b96dc0216a010c1fde8d334f94ff85577dfe4c12da1a",
+      "crop_seconds": [
+        16.0,
+        21.0
+      ]
+    },
+    {
+      "track": "00_BN1-129-Eb_comp",
+      "annotation_member": "00_BN1-129-Eb_comp.jams",
+      "annotation_sha256": "cd79564c51d0dec7d04e010d31525e9f7d2b9d41cf6116118a66ac5a8c181007",
+      "audio_member": "00_BN1-129-Eb_comp_mic.wav",
+      "audio_member_sha256": "59e1e3c9bebdabd48afe28050a2c031e6cf36e5697268301cdf2e74bc66b71f1",
+      "derived_input_sha256": "8494b9167d5baafcbee96454f295f9c568f1197b9abbb9783f656f5fd399ee66",
+      "reference_sha256": "7e13661907ed0cf3be60db1d26e509fa94432e98a9a7ff51e1ef7158db97fed3",
+      "crop_seconds": [
+        0.0,
+        5.0
+      ]
+    }
+  ],
+  "excluded_tracks": [
+    "04_BN3-154-E_comp",
+    "04_Jazz1-200-B_comp",
+    "02_Funk2-119-G_comp"
+  ],
+  "scope": "Explicit real reference smoke acquisition, not actual engine quality results or a representative benchmark"
+}

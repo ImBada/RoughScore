@@ -44,6 +44,8 @@ jobs:
         run: |
           bash -n scripts/ci/run.sh
           python3 -m unittest discover -s scripts/ci -p 'test_*.py' -v
+          python3 -m unittest discover -s Tests/Evaluation -p 'test_*.py' -v
+          python3 scripts/evaluate-transcription.py --output "$RUNNER_TEMP/evaluation-unavailable.json"
       - name: Test generated audio and build release
         run: bash scripts/ci/run.sh "$RUNNER_TEMP/roughscore-ci" '${{ matrix.analysis }}'
       - name: Publish verification summary
@@ -64,5 +66,6 @@ jobs:
             ${{ runner.temp }}/roughscore-ci/*.json
             ${{ runner.temp }}/roughscore-ci/*.md
             ${{ runner.temp }}/roughscore-ci/fixture/manifest.json
+            ${{ runner.temp }}/evaluation-unavailable.json
           if-no-files-found: warn
           retention-days: 7
