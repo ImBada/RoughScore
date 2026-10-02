@@ -255,6 +255,45 @@ struct BulkEditTests {
         #expect(throws: TabEditError.unrepresentableTiming) { try TabEditCommand.paste(fragment: fragment, at: 80_000).apply(to: project) }
     }
 
+    @Test(arguments: [false, true])
+    func copyNormalizationRejectsNewCoincidenceAtomically(rangeCopy: Bool) throws {
+        // Independent IEEE tie-rounding example: the latter two original instants
+        // differ by one ULP, but subtracting a half-ULP origin ties both to a.
+        let origin = 1.0.ulp / 2
+        let a = 1.0.nextUp.nextUp, b = a.nextUp
+        #expect(a < b && a - origin == b - origin)
+        let events = [TabEvent(time: origin, lane: .left, string: 6),
+                      TabEvent(time: a, lane: .left, string: 5),
+                      TabEvent(time: b, lane: .left, string: 4)]
+        let project = ScoreProject(duration: 4, events: events)
+        let selection = try rangeCopy
+            ? TabSelection.range(in: project, lane: .left, from: origin, to: 4)
+            : TabSelection(ids: Set(events.map(\.id)))
+        #expect(throws: TabEditError.unrepresentableTiming) {
+            try TabFragment.copy(from: project, selection: selection)
+        }
+        #expect(project.events == events)
+        #expect(project.events.map { $0.time.bitPattern } == events.map { $0.time.bitPattern })
+    }
+
+    @Test(arguments: [false, true])
+    func copyNormalizationPreservesIntentionalCoincidence(rangeCopy: Bool) throws {
+        let origin = 1.0.ulp / 2, chordTime = 1.0.nextUp.nextUp
+        let events = [TabEvent(time: origin, lane: .left, string: 6),
+                      TabEvent(time: chordTime, lane: .left, string: 5),
+                      TabEvent(time: chordTime, lane: .left, string: 4)]
+        let project = ScoreProject(duration: 4, events: events)
+        let selection = try rangeCopy
+            ? TabSelection.range(in: project, lane: .left, from: origin, to: 4)
+            : TabSelection(ids: Set(events.map(\.id)))
+        let fragment = try TabFragment.copy(from: project, selection: selection)
+        #expect(fragment.events.map(\.relativeTime) == [0, chordTime - origin, chordTime - origin])
+        let pasted = try TabEditCommand.paste(fragment: fragment, at: 0).apply(to: project)
+        #expect(pasted.changed && pasted.affectedIDs.count == 3)
+        #expect(pasted.project.events.suffix(2).map(\.time) == [chordTime - origin, chordTime - origin])
+        #expect(project.events == events)
+    }
+
     @Test func legacyV1AndCurrentProjectsInteroperateAndFutureProjectIsRejected() throws {
         let original = riff()
         let decoded = try JSONDecoder().decode(ScoreProject.self, from: JSONEncoder().encode(original)).validated()

@@ -49,9 +49,14 @@ public struct TabFragment: Codable, Equatable, Sendable {
             // explicitly; silently changing the anchor would lose leading silence.
             throw TabEditError.invalidCopyOrigin
         }
-        let entries = selected.map {
-            Entry(relativeTime: $0.time - origin, lane: $0.lane, string: $0.string,
-                  fret: $0.fret, length: $0.length, tentative: $0.tentative, memo: $0.memo)
+        let normalizedTimes = selected.map { $0.time - origin }
+        // Subtraction can tie-round distinct instants into the same offset.
+        // Reject while original times are still available; paste cannot recover
+        // the lost distinction from an already collapsed fragment.
+        try TabEditCommand.preserveDistinctTimes(original: selected.map(\.time), shifted: normalizedTimes)
+        let entries = selected.enumerated().map { index, event in
+            Entry(relativeTime: normalizedTimes[index], lane: event.lane, string: event.string,
+                  fret: event.fret, length: event.length, tentative: event.tentative, memo: event.memo)
         }
         return try Self(events: entries, primaryIndex: selected.firstIndex { $0.id == selection.primaryID })
     }

@@ -67,7 +67,10 @@ actual `affectedIDs`, and an optional new paste selection.
   Offsets use ordinary IEEE Double addition/subtraction, without rounding or a
   musical grid. If precision loss would collapse two distinct instants into a
   new coincidence, the whole operation rejects with `unrepresentableTiming`.
-  Existing coincident notes remain valid and separately identified.
+  The same guard runs during copy's origin subtraction, before any fragment is
+  returned, so normalized offsets cannot conceal a newly invented coincidence
+  from later paste validation. Existing coincident notes remain valid and
+  separately identified in multi-selection and range copies.
 - Delete removes only selected UUIDs. Length and tentative commands alter only
   the requested field on those UUIDs. Title, project version, source metadata,
   duration, tuning, analyses and all other project fields are copied unchanged.
@@ -135,8 +138,16 @@ including one-undo application, collision display/gesture integration, cursor
 paste/duplicate commands and system pasteboard ownership.
 
 Local validation on accepted maind6775e6cf4920a54dd23d91c0436e0bdcfaeb4b6:
-136 Swift tests in15 suites, including16 BulkEditTests, passed; release build
+138 Swift tests in15 suites, including18 BulkEditTests, passed; release build
 passed;33 evaluator and7 CI-helper Python tests passed. Exact memo UTF-8 bytes
 (including decomposed Unicode) and no-op negative-zero timestamp bits are checked.
 This is core/schema verification only; GUI and actual one-undo behavior remain
 for the #8 integration owner.
+
+Independent review R29-1 found IEEE tie-rounding during copy normalization:
+subtracting origin1.0.ulp/2 from two distinct one-ULP-separated instants near1s
+produced equal offsets, which paste could no longer distinguish from a real
+chord. Both multi/range regression cases failed against the published1ada246
+implementation before repair. Copy now invokes the same distinct-time guard as
+move/paste before constructing a fragment; the new multi/range regressions pass
+after repair, and genuine pre-existing coincident notes still copy/paste.

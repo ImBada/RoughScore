@@ -101,7 +101,9 @@ public enum TabEditCommand: Sendable {
     /// chord through floating-point precision loss. Existing coincident notes are
     /// valid and remain individually identified. Ordinary IEEE addition/subtraction
     /// is used; no quantization, epsilon clamp or invented interval is applied.
-    private static func preserveDistinctTimes(original: [Double], shifted: [Double]) throws {
+    // Internal so clipboard copy uses the same rule before normalization can
+    // discard the source-time distinction that later paste validation needs.
+    static func preserveDistinctTimes(original: [Double], shifted: [Double]) throws {
         let ordered = zip(original, shifted).sorted { $0.0 < $1.0 }
         for pair in zip(ordered, ordered.dropFirst()) {
             if pair.0.0 < pair.1.0, pair.0.1 >= pair.1.1 { throw TabEditError.unrepresentableTiming }
