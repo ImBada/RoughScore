@@ -429,8 +429,10 @@ struct TabCanvas: View {
                     let shown = workspace.renderedEvent(event)
                     let x = 48 + (shown.time - workspace.windowStart) / span * width
                     DraggableTabNote(workspace: workspace, event: event, space: "timeline-tab",
-                                     position: { note in CGPoint(x: 48 + (note.time - workspace.windowStart) / span * width,
-                                                                  y: Double(68 + (note.string - 1) * 32)) },
+                                     position: { note in
+                                         let timeX: Double = 48 + (note.time - workspace.windowStart) / span * Double(width)
+                                         return CGPoint(x: CGFloat(timeX), y: CGFloat(68 + (note.string - 1) * 32))
+                                     },
                                      destination: { note, translation in
                                          (min(workspace.windowEnd - 0.001, max(workspace.windowStart, note.time + translation.width / width * span)),
                                           note.string + Int(round(translation.height / 32)))
