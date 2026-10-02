@@ -442,6 +442,115 @@ struct WorkspaceTransitionTests {
         #expect(workspace.status == status && !workspace.canEdit)
     }
 
+    @Test func originalDisappearingAfterRealDecodePreservesTheEntireSavedWorkspace() async throws {
+        let f = try TransitionFixture(); defer { f.clean() }
+        let originalURL = try f.audio("playable-original"), replacementURL = try f.audio("removed-original")
+        let projectURL = f.root.appendingPathComponent("prior.roughscore")
+        let saved = ScoreProject(title: "keep this project", audioPath: originalURL.path, duration: 20,
+                                 events: [TabEvent(time: 4.213, lane: .right, string: 2, memo: "unknown")])
+        try JSONEncoder().encode(saved).write(to: projectURL)
+        let capture = PreparedCapture()
+        var services = f.services()
+        services.prepare = { url, progress in
+            let decoded = try await AudioPreparation.prepare(url, progress: progress)
+            await capture.record(decoded)
+            if url == replacementURL { try FileManager.default.removeItem(at: url) }
+            return decoded
+        }
+        let workspace = Workspace(services: services); defer { workspace.shutdown() }
+        let initial = try #require(workspace.loadProject(at: projectURL)); #expect(await initial.value)
+        workspace.addEvent(time: 2.083, string: 5); workspace.inputDigit(1, at: 100); workspace.inputDigit(2, at: 100.1)
+        workspace.updateSelected { $0.memo = "keep undo and redo" }
+        workspace.updateSelected { $0.tentative = true }; workspace.undoEdit()
+        workspace.switchSource(.left)
+        let before = workspace.project, selected = workspace.selectedID, cursor = workspace.cursor
+        let oldAudio = try #require(workspace.prepared)
+        let originalBytes = try Data(contentsOf: originalURL)
+        #expect(workspace.dirty && workspace.canUndo && workspace.canRedo && workspace.hasSaveLocation)
+        let replacement = try #require(workspace.loadAudio(at: replacementURL, relink: true))
+        #expect(!(await replacement.value))
+        let staged = try #require(await capture.latest)
+        #expect(workspace.error != nil && workspace.canEdit)
+        #expect(workspace.project == before && workspace.dirty && workspace.source == .left)
+        #expect(workspace.selectedID == selected && workspace.cursor == cursor)
+        #expect(workspace.canUndo && workspace.canRedo && workspace.hasSaveLocation)
+        #expect(workspace.prepared?.directory == oldAudio.directory)
+        #expect(FileManager.default.fileExists(atPath: oldAudio.directory.path))
+        #expect(!FileManager.default.fileExists(atPath: staged.directory.path))
+        #expect(!FileManager.default.fileExists(atPath: replacementURL.path))
+        #expect(try Data(contentsOf: originalURL) == originalBytes)
+        #expect(try AVAudioPlayer(contentsOf: oldAudio.url(for: .left)).duration == 20)
+        // Observe both retained history directions, rather than just their flags.
+        workspace.redoEdit(); #expect(workspace.selected?.tentative == true)
+        workspace.undoEdit(); #expect(workspace.project == before)
+        // A failed relink must leave the active save destination pointing at the old file.
+        workspace.save()
+        let persisted = try JSONDecoder().decode(ScoreProject.self, from: Data(contentsOf: projectURL))
+        #expect(persisted == before)
+    }
+
+    @Test func injectedPlayerFailureKeepsSaveDestinationAndCleansOnlyNewAudio() async throws {
+        let f = try TransitionFixture(); defer { f.clean() }
+        let oldURL = try f.audio("old-player"), newURL = try f.audio("failed-player")
+        let oldProjectURL = f.root.appendingPathComponent("old.roughscore")
+        let newProjectURL = f.root.appendingPathComponent("new.roughscore")
+        let old = ScoreProject(title: "old", audioPath: oldURL.path, duration: 20)
+        let new = ScoreProject(title: "new", audioPath: newURL.path, duration: 20)
+        try JSONEncoder().encode(old).write(to: oldProjectURL)
+        try JSONEncoder().encode(new).write(to: newProjectURL)
+        let newDocumentBytes = try Data(contentsOf: newProjectURL)
+        var services = f.services()
+        services.makePlayer = { url in
+            if url == newURL { throw PlaybackTestFailure() }
+            return try AVAudioPlayer(contentsOf: url)
+        }
+        let workspace = Workspace(services: services); defer { workspace.shutdown() }
+        let initial = try #require(workspace.loadProject(at: oldProjectURL))
+        await f.fake.started(oldURL)
+        let oldAudio = try f.prepared(oldURL)
+        await f.fake.finish(oldURL, result: .success(oldAudio)); #expect(await initial.value)
+        // No modal discard prompt: this saved project is still clean and has readable offline TAB.
+        let replacement = try #require(workspace.loadProject(at: newProjectURL))
+        await f.fake.started(newURL)
+        let staged = try f.prepared(newURL)
+        await f.fake.finish(newURL, result: .success(staged))
+        #expect(!(await replacement.value))
+        #expect(workspace.error == "Injected player initialization failure")
+        #expect(workspace.project == old && !workspace.dirty && workspace.hasSaveLocation)
+        #expect(workspace.prepared?.directory == oldAudio.directory)
+        #expect(FileManager.default.fileExists(atPath: oldAudio.directory.path))
+        #expect(!FileManager.default.fileExists(atPath: staged.directory.path))
+        #expect(FileManager.default.fileExists(atPath: oldURL.path) && FileManager.default.fileExists(atPath: newURL.path))
+        workspace.addEvent(time: 1.213, string: 6); workspace.inputDigit(7, at: 100)
+        let retained = workspace.project
+        workspace.save()
+        #expect(try JSONDecoder().decode(ScoreProject.self, from: Data(contentsOf: oldProjectURL)) == retained)
+        #expect(try Data(contentsOf: newProjectURL) == newDocumentBytes)
+    }
+
+    @Test func cancellationDuringPlayerInitializationStillCannotCommit() async throws {
+        let f = try TransitionFixture(); defer { f.clean() }
+        let url = try f.audio("cancel-during-player")
+        let reference = WorkspaceReference()
+        var services = f.services()
+        services.makePlayer = { url in
+            let player = try AVAudioPlayer(contentsOf: url)
+            reference.workspace?.cancelLoading()
+            return player
+        }
+        let workspace = Workspace(services: services); reference.workspace = workspace
+        defer { workspace.shutdown() }
+        let before = workspace.project
+        let task = try #require(workspace.loadAudio(at: url))
+        await f.fake.started(url)
+        let staged = try f.prepared(url)
+        await f.fake.finish(url, result: .success(staged))
+        #expect(!(await task.value))
+        #expect(workspace.project == before && workspace.prepared == nil && workspace.canEdit)
+        #expect(!FileManager.default.fileExists(atPath: staged.directory.path))
+        #expect(FileManager.default.fileExists(atPath: url.path))
+    }
+
     @Test func actualDecoderReportsMonotonicFrameProgressAndCooperatesWithChunkCancellation() async throws {
         let f = try TransitionFixture(); defer { f.clean() }
         let url = try f.audio("actual", duration: 40)
@@ -498,4 +607,18 @@ private actor Deferred<Value: Sendable> {
         await withCheckedContinuation { waiter = $0 }
     }
     func finish(_ value: Value) { continuation?.resume(returning: value); continuation = nil }
+}
+
+private actor PreparedCapture {
+    private(set) var latest: PreparedAudio?
+    func record(_ audio: PreparedAudio) { latest = audio }
+}
+
+private struct PlaybackTestFailure: LocalizedError {
+    var errorDescription: String? { "Injected player initialization failure" }
+}
+
+@MainActor
+private final class WorkspaceReference {
+    weak var workspace: Workspace?
 }

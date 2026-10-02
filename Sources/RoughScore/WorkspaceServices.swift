@@ -1,3 +1,4 @@
+import AVFoundation
 import Foundation
 import RoughScoreCore
 
@@ -7,6 +8,7 @@ struct WorkspaceServices: Sendable {
     var createDemo: @Sendable (ScoreProject) async throws -> URL
     var readProject: @Sendable (URL) async throws -> ScoreProject
     var analyze: @Sendable (URL, Double) async throws -> AnalysisSummary
+    var makePlayer: @MainActor @Sendable (URL) throws -> AVAudioPlayer
     var fileExists: @Sendable (URL) -> Bool
     var lastProject: @MainActor @Sendable () -> URL?
     var rememberProject: @MainActor @Sendable (URL) -> Void
@@ -24,6 +26,7 @@ struct WorkspaceServices: Sendable {
             return try await withTaskCancellationHandler { try await task.value } onCancel: { task.cancel() }
         },
         analyze: { try await AppleMusicAnalysis.analyze($0, duration: $1) },
+        makePlayer: { try AVAudioPlayer(contentsOf: $0) },
         fileExists: { FileManager.default.fileExists(atPath: $0.path) },
         lastProject: { UserDefaults.standard.string(forKey: "lastProjectPath").map { URL(fileURLWithPath: $0) } },
         rememberProject: { UserDefaults.standard.set($0.path, forKey: "lastProjectPath") }

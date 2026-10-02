@@ -657,9 +657,13 @@ final class Workspace: ObservableObject {
                 staged = try await stageAudio(url, preserving: relink ? operation.snapshot : nil, operation: operation)
             case .project(let url): staged = try await stageProject(url, operation: operation)
             }
-            try requireCurrent(operation)
             guard let staged else { return false }
-            activate(staged)
+            try requireCurrent(operation)
+            let stagedPlayer = try preparePlayer(for: staged)
+            // Player initialization can fail or reenter through an injected service.
+            // Recheck ownership only after all fallible work and before touching old state.
+            try requireCurrent(operation)
+            activate(staged, player: stagedPlayer)
             committed = true; loadProgress = 1
             return true
         } catch {
@@ -670,7 +674,16 @@ final class Workspace: ObservableObject {
         }
     }
 
-    private func activate(_ staged: StagedWorkspace) {
+    private func preparePlayer(for staged: StagedWorkspace) throws -> AVAudioPlayer? {
+        guard let audio = staged.audio else { return nil }
+        let candidate = try services.makePlayer(audio.url(for: .stereo))
+        candidate.enableRate = true; candidate.rate = rate
+        candidate.currentTime = staged.isDemo ? 2 : 0
+        guard candidate.prepareToPlay() else { throw AudioIssue.unsupported }
+        return candidate
+    }
+
+    private func activate(_ staged: StagedWorkspace, player stagedPlayer: AVAudioPlayer?) {
         stopAndCleanAudio()
         let previousDemo = demoURL
         if let previousDemo, previousDemo != staged.audio?.original {
@@ -685,7 +698,8 @@ final class Workspace: ObservableObject {
         inspectorVisible = false; scorePage = 0; followScore = true
         loopStart = staged.isDemo ? 2 : 0; loopEnd = staged.isDemo ? 6 : min(project.duration, 4)
         looping = false; source = .stereo
-        configurePlayer(); dirty = !staged.fromDisk && !staged.isDemo && staged.dirty
+        player = stagedPlayer
+        dirty = !staged.fromDisk && !staged.isDemo && staged.dirty
         savedProject = project
         if staged.fromDisk, let url = projectURL { services.rememberProject(url) }
         status = staged.status; requestKeyboardFocus?()
