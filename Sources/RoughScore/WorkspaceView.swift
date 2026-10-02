@@ -324,7 +324,7 @@ struct WaveformView: View {
     var body: some View {
         GeometryReader { geometry in
             Canvas { context, size in
-                let span = max(0.001, workspace.windowEnd - workspace.windowStart)
+                let span = (TimeBounds.span(start: workspace.windowStart, end: workspace.windowEnd) ?? 1)
                 let start = workspace.windowStart
                 func x(_ t: Double) -> Double { 38 + (t - start) / span * (size.width - 58) }
                 if workspace.looping || dragRange != nil {
@@ -391,7 +391,7 @@ struct TabCanvas: View {
     @ObservedObject var workspace: Workspace
     var body: some View {
         GeometryReader { geometry in
-            let span = max(0.001, workspace.windowEnd - workspace.windowStart)
+            let span = (TimeBounds.span(start: workspace.windowStart, end: workspace.windowEnd) ?? 1)
             let width = geometry.size.width - 78
             ZStack(alignment: .topLeading) {
                 Canvas { context, size in
@@ -453,7 +453,7 @@ struct TabCanvas: View {
                                          return CGPoint(x: CGFloat(timeX), y: CGFloat(68 + (note.string - 1) * 32))
                                      },
                                      destination: { note, translation in
-                                         (min(workspace.windowEnd - 0.001, max(workspace.windowStart, note.time + translation.width / width * span)),
+                                         (TimeBounds.timelineDragTime(note.time, start: workspace.windowStart, end: workspace.windowEnd, translation: translation.width, width: width) ?? note.time,
                                           note.string + Int(round(translation.height / 32)))
                                      }, magnetTargets: workspace.visibleEvents, displayScale: 1,
                                      compact: false, background: Palette.panel, ink: Palette.background, tentative: Palette.purple)
