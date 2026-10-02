@@ -180,8 +180,18 @@ time and `/usr/bin/time -l` peak process RSS for the actual supported host; the
 latter includes runtime, generation and input buffer, not DSP-only memory.
 
 Measured on this worker's arm64 macOS27.0.1 (26A434), Swift6.4, 10 logical
-CPUs, optimized standalone build: 19.65 ms analysis, 0.35 s total process wall
-time including signal generation/runtime startup, peak RSS19,988,480 bytes
-(19.06 MiB), peak process memory footprint12,780,072 bytes. All60 generated
+CPUs, optimized standalone build: 23.32 ms analysis, 0.34 s total process wall
+time including signal generation/runtime startup, peak RSS20,054,016 bytes
+(19.13 MiB). All60 generated
 notes qualified and met30 ms/one-semitone bounds. This is one host/run, not a
 latency guarantee; cancellation timing is also emitted by the benchmark.
+
+Final local regression:107 Swift tests across12 suites passed on the rebased
+main baseline56548221c4772dea482399df8a33dfdc6e5439b1; release build passed;
+33 evaluator and7 CI-helper Python tests passed. The30 s cancellation run
+threw at the12th pitch-stage checkpoint with last progress0.5, no partial
+result, and39 microseconds from cancellation request to observed throw.
+The actual headless stereo WAV export also measured L E2 at1.000 s and R A3
+at1.148 s with origin0.8, independent channels and the actual input SHA256.
+Local tests use the current host SDK; both actual GitHub SDK jobs must succeed
+and a different reviewer must approve the exact PR head before root merges.
