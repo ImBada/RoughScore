@@ -1,3 +1,5 @@
+import AppKit
+import UniformTypeIdentifiers
 import AVFoundation
 import Foundation
 import RoughScoreCore
@@ -9,6 +11,13 @@ struct WorkspaceServices: Sendable {
     var readProject: @Sendable (URL) async throws -> ScoreProject
     var analyze: @Sendable (URL, Double) async throws -> AnalysisSummary
     var makePlayer: @MainActor @Sendable (URL) throws -> AVAudioPlayer
+    var writeProject: @MainActor @Sendable (Data, URL) throws -> Void = { try $0.write(to: $1, options: .atomic) }
+    var chooseSaveDestination: @MainActor @Sendable (String) -> URL? = { title in
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = title
+        panel.allowedContentTypes = [UTType(filenameExtension: "roughscore") ?? .json]
+        return panel.runModal() == .OK ? panel.url : nil
+    }
     var fileExists: @Sendable (URL) -> Bool
     var lastProject: @MainActor @Sendable () -> URL?
     var rememberProject: @MainActor @Sendable (URL) -> Void

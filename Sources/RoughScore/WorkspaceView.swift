@@ -238,7 +238,7 @@ struct WorkspaceView: View {
             Button { workspace.redoEdit() } label: { Image(systemName: "arrow.uturn.forward") }.disabled(!workspace.canRedo).help("다시 실행 · ⇧⌘Z")
             Button { workspace.deleteSelected() } label: { Image(systemName: "trash") }.disabled(workspace.selected == nil).help("선택한 음 삭제 · Delete")
             Toggle("상세", isOn: $workspace.inspectorVisible).toggleStyle(.button).help("상세 편집 · I")
-            Text(workspace.hasSaveLocation ? "자동 저장" : "⌘S 저장").font(.system(size: 9)).foregroundStyle(Palette.secondary)
+            Text(workspace.saveState.title).font(.system(size: 9)).foregroundStyle(Palette.secondary)
         }.font(.system(size: 10)).buttonStyle(.borderless).frame(height: 27)
     }
 
