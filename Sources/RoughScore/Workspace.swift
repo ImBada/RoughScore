@@ -651,11 +651,15 @@ final class Workspace: ObservableObject {
                 staged = try await stageAudio(URL(fileURLWithPath: path), preserving: loaded, operation: operation)
             } catch {
                 try requireCurrent(operation)
-                staged = StagedWorkspace(project: loaded, status: "오디오를 열지 못했습니다 · TAB은 오프라인으로 편집할 수 있습니다",
+                let fingerprint = try? await Task.detached {
+                    try AudioPreparation.contentFingerprint(URL(fileURLWithPath: path))
+                }.value
+                try requireCurrent(operation)
+                staged = StagedWorkspace(project: loaded.invalidatingUnverifiedAnalysis(fingerprint: fingerprint), status: "오디오를 열지 못했습니다 · TAB은 오프라인으로 편집할 수 있습니다",
                     offlineReason: error.localizedDescription)
             }
         } else {
-            staged = StagedWorkspace(project: loaded, status: "오디오 경로를 찾을 수 없습니다 · TAB은 오프라인으로 편집할 수 있습니다",
+            staged = StagedWorkspace(project: loaded.invalidatingUnverifiedAnalysis(fingerprint: nil), status: "오디오 경로를 찾을 수 없습니다 · TAB은 오프라인으로 편집할 수 있습니다",
                 offlineReason: "연결된 오디오를 찾을 수 없습니다")
         }
         staged.projectURL = url; staged.fromDisk = true; staged.baseline = loaded
@@ -713,7 +717,8 @@ final class Workspace: ObservableObject {
                 try requireCurrent(operation)
                 guard candidate.fromDisk, let decoded = candidate.baseline else { throw error }
                 if let audio = candidate.audio { try? FileManager.default.removeItem(at: audio.directory) }
-                candidate.project = decoded; candidate.audio = nil
+                candidate.project = decoded.invalidatingUnverifiedAnalysis(fingerprint: candidate.audio?.identity?.sha256)
+                candidate.audio = nil
                 candidate.offlineReason = error.localizedDescription
                 candidate.status = "오디오를 열지 못했습니다 · TAB은 오프라인으로 편집할 수 있습니다"
                 staged = candidate; stagedPlayer = nil

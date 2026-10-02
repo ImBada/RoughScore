@@ -115,6 +115,24 @@ public struct ScoreProject: Codable, Equatable, Sendable {
     }
 
 
+    /// Offline notes remain available; only summaries with known, uncontradicted source provenance survive.
+    public func invalidatingUnverifiedAnalysis(fingerprint: String?) -> Self {
+        var candidate = self
+        let originalID = originalAsset?.id
+        candidate.analyses = analyses.filter { _, summary in
+            guard let provenance = summary.provenance else { return false }
+            if provenance.assetID == originalID, let fingerprint {
+                return provenance.identity.sha256 == fingerprint
+            }
+            return true // Missing/unreadable media does not disprove a known source snapshot.
+        }
+        if let fingerprint, let index = candidate.assets?.firstIndex(where: { $0.role == .original }),
+           candidate.assets?[index].identity?.sha256 != fingerprint {
+            candidate.assets?[index].identity = nil
+        }
+        return candidate
+    }
+
     public func soundingMIDI(string: Int, fret: Int) -> Int? {
         guard (1...6).contains(string), (0...24).contains(fret) else { return nil }
         let definition = tuningDefinition ?? (tuning == ["E", "B", "G", "D", "A", "E"] ? TuningDefinition() : nil)

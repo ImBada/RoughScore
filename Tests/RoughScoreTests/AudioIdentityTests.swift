@@ -163,6 +163,50 @@ struct AudioIdentityTests {
         }
     }
 
+    @Test func corruptReplacementInvalidatesDerivedDataWhileKeepingOfflineTAB() async throws {
+        let f = try IdentityFixture(); defer { f.clean() }
+        let original = try f.audio("corrupt-replacement")
+        let audio = try await AudioPreparation.prepare(original)
+        defer { try? FileManager.default.removeItem(at: audio.directory) }
+        let identity = try #require(audio.identity)
+        var project = try ScoreProject(title: "keep TAB", duration: 20, events: f.manual).relinkingOriginal(
+            path: original.path, identity: identity, duration: 20)
+        let asset = try #require(project.originalAsset)
+        project.analyses["stereo"] = AnalysisSummary(bpm: 120, beats: [1], provenance: AnalysisProvenance(
+            assetID: asset.id, identity: identity, channel: "stereo", analyzerVersion: "source-test-v1"))
+        let doc = try f.document(project)
+        try Data("corrupt replacement bytes".utf8).write(to: original, options: .atomic)
+        let workspace = Workspace(services: f.services()); defer { workspace.shutdown() }
+        #expect(await workspace.loadProject(at: doc)?.value == true)
+        #expect(workspace.project.events == project.events && workspace.project.duration == project.duration)
+        #expect(workspace.prepared == nil && workspace.project.analyses.isEmpty)
+        #expect(workspace.project.originalAsset?.identity == nil && workspace.dirty)
+        workspace.save()
+        let saved = try JSONDecoder().decode(ScoreProject.self, from: Data(contentsOf: doc)).validated()
+        #expect(saved == workspace.project && !workspace.dirty)
+    }
+
+    @Test(arguments: [false, true]) func missingAudioKeepsOnlyProvenOfflineSummaries(proven: Bool) async throws {
+        let f = try IdentityFixture(); defer { f.clean() }
+        let path = f.root.appendingPathComponent("missing.caf").path
+        var project = ScoreProject(title: "offline provenance", audioPath: path, duration: 20, events: f.manual,
+                                   analyses: ["stereo": AnalysisSummary(bpm: 120, beats: [1])])
+        if proven {
+            let identity = AudioContentIdentity(sha256: String(repeating: "a", count: 64), channelCount: 1, sampleRate: 8000, frameCount: 160000)
+            let asset = AudioAsset(reference: AudioReference(path: path), identity: identity)
+            project.assets = [asset]
+            project.analyses["stereo"]?.provenance = AnalysisProvenance(assetID: asset.id, identity: identity,
+                channel: "stereo", analyzerVersion: "known-source-v1")
+        }
+        let doc = try f.document(project)
+        let workspace = Workspace(services: f.services()); defer { workspace.shutdown() }
+        #expect(await workspace.loadProject(at: doc)?.value == true)
+        #expect(workspace.project.events == project.events && workspace.project.duration == project.duration)
+        #expect(workspace.prepared == nil)
+        #expect(workspace.project.analyses.isEmpty == !proven)
+        #expect(workspace.dirty == !proven)
+    }
+
     @Test func legacyAnalysisWithoutProvenanceIsInvalidatedEvenForSameLength() throws {
         let f = try IdentityFixture(); defer { f.clean() }
         let legacy = ScoreProject(title: "legacy", duration: 20, events: f.manual,
