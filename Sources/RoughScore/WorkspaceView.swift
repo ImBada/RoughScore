@@ -41,6 +41,7 @@ struct WorkspaceView: View {
                             Text("\(clockLabel(workspace.project.duration)) · \(workspace.lane.title)")
                                 .font(.system(size: 11)).foregroundStyle(Palette.secondary)
                         }
+                        audioConnectionBar
                         transport
                         quickEditBar
                         ScoreSheetView(workspace: workspace)
@@ -50,6 +51,7 @@ struct WorkspaceView: View {
                         heading
                         transport
                         quickEditBar
+                        audioConnectionBar
                         audioPanel
                         tabPanel
                         HStack(spacing: 22) {
@@ -242,6 +244,15 @@ struct WorkspaceView: View {
         }.font(.system(size: 10)).buttonStyle(.borderless).frame(height: 27)
     }
 
+    private var audioConnectionBar: some View {
+        HStack {
+            Text(workspace.audioConnection).lineLimit(1).foregroundStyle(Palette.secondary)
+            Spacer()
+            Button(workspace.prepared == nil ? "오디오 다시 연결…" : "오디오 교체…") { workspace.importAudio(relink: true) }
+                .disabled(!workspace.canLoad)
+        }.font(.system(size: 10)).buttonStyle(.borderless)
+    }
+
     private var audioPanel: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack {
@@ -257,7 +268,6 @@ struct WorkspaceView: View {
             HStack {
                 Text("파형을 클릭해서 이동").foregroundStyle(Palette.secondary)
                 Spacer()
-                if workspace.prepared == nil { Button("오디오 다시 연결…") { workspace.importAudio(relink: true) } }
                 Text("L / R · 원본 채널").foregroundStyle(Palette.secondary)
             }.font(.system(size: 10))
         }

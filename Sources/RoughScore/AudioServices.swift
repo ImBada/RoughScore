@@ -1,5 +1,6 @@
 import AVFoundation
 import Foundation
+import CryptoKit
 import RoughScoreCore
 #if canImport(MusicUnderstanding)
 import MusicUnderstanding
@@ -14,6 +15,7 @@ struct PreparedAudio: Sendable {
     let isMono: Bool
     let leftPeaks: [Float]
     let rightPeaks: [Float]
+    var identity: AudioContentIdentity? = nil
     func url(for source: ListeningSource) -> URL {
         switch source { case .stereo: original; case .left: left; case .right: right }
     }
@@ -36,6 +38,7 @@ enum AudioPreparation {
         let task = Task.detached(priority: .userInitiated) {
             try Task.checkCancellation()
             await progress(0)
+            let fingerprint = try contentFingerprint(url)
             let file = try AVAudioFile(forReading: url, commonFormat: .pcmFormatFloat32, interleaved: false)
             let format = file.processingFormat
             guard (1...2).contains(format.channelCount), file.length > 0,
@@ -78,15 +81,31 @@ enum AudioPreparation {
                     await progress(Double(offset) / Double(file.length))
                 }
                 try Task.checkCancellation()
+                guard try contentFingerprint(url) == fingerprint else { throw AudioIssue.unsupported }
                 return PreparedAudio(original: url, left: leftURL, right: rightURL, directory: directory,
                                      duration: duration, isMono: format.channelCount == 1,
-                                     leftPeaks: leftPeaks, rightPeaks: rightPeaks)
+                                     leftPeaks: leftPeaks, rightPeaks: rightPeaks,
+                                     identity: AudioContentIdentity(sha256: fingerprint, channelCount: Int(format.channelCount),
+                                         sampleRate: format.sampleRate, frameCount: file.length))
             } catch {
                 try? FileManager.default.removeItem(at: directory)
                 throw error
             }
         }
         return try await withTaskCancellationHandler { try await task.value } onCancel: { task.cancel() }
+    }
+
+    /// Hash in bounded chunks and cooperate with cancellation; never read user fixture paths implicitly.
+    static func contentFingerprint(_ url: URL) throws -> String {
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+        var hash = SHA256()
+        while true {
+            try Task.checkCancellation()
+            guard let data = try handle.read(upToCount: 1_048_576), !data.isEmpty else { break }
+            hash.update(data: data)
+        }
+        return hash.finalize().map { String(format: "%02x", $0) }.joined()
     }
 
     static func createDemo(project: ScoreProject = .demo) throws -> URL {
@@ -101,7 +120,7 @@ enum AudioPreparation {
         for channel in 0..<2 { channels[channel].initialize(repeating: 0, count: count) }
         for event in project.events {
             try Task.checkCancellation()
-            guard let fret = event.fret, let midi = TabMath.midi(string: event.string, fret: fret) else { continue }
+            guard let fret = event.fret, let midi = project.soundingMIDI(string: event.string, fret: fret) else { continue }
             let frequency = 440 * pow(2, Double(midi - 69) / 12)
             let channel = event.lane == .left ? 0 : 1
             let start = Int(event.time * sampleRate)

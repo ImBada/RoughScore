@@ -8,6 +8,7 @@ import UniformTypeIdentifiers
 final class Workspace: ObservableObject {
     @Published var project = ScoreProject.demo
     @Published var prepared: PreparedAudio?
+    @Published private(set) var audioConnection = "오디오 준비 전"
     @Published var source: ListeningSource = .stereo
     @Published var lane: GuitarLane = .left
     @Published var activeString = 6
@@ -103,6 +104,7 @@ final class Workspace: ObservableObject {
         var fromDisk = false
         var baseline: ScoreProject?
         var status: String
+        var offlineReason: String?
     }
 
     init(services: WorkspaceServices = .live, awaitsStartup: Bool = false) {
@@ -516,7 +518,7 @@ final class Workspace: ObservableObject {
     @discardableResult
     func analyze() -> Task<Void, Never>? {
         guard canEdit, let prepared, !analyzing else { return nil }
-        let target = source, identity = projectIdentity, duration = project.duration
+        let target = source, identityID = projectIdentity, duration = project.duration
         let id = UUID()
         analysisID = id
         analyzing = true; status = "\(target.title) 분석 중…"
@@ -527,9 +529,24 @@ final class Workspace: ObservableObject {
             do {
                 let summary = try await services.analyze(prepared.url(for: target), duration)
                 try Task.checkCancellation()
-                guard !closed, analysisID == id, projectIdentity == identity,
+                guard !closed, analysisID == id, projectIdentity == identityID,
                       self.prepared?.directory == prepared.directory else { return }
-                project.analyses[target.rawValue] = summary; changed()
+                if let identity = prepared.identity {
+                    let fingerprint = try await Task.detached {
+                        try AudioPreparation.contentFingerprint(prepared.original)
+                    }.value
+                    try Task.checkCancellation()
+                    guard !closed, analysisID == id, projectIdentity == identityID,
+                          fingerprint == identity.sha256 else { throw AudioIssue.unsupported }
+                }
+                var attributed = summary
+                if let asset = project.originalAsset, let identity = prepared.identity, asset.identity == identity {
+                    attributed.provenance = AnalysisProvenance(assetID: asset.id, identity: identity,
+                        channel: target.rawValue, analyzerVersion: services.analyzerVersion)
+                }
+                var candidate = project
+                candidate.analyses[target.rawValue] = attributed
+                project = try candidate.validated(); changed()
                 status = "\(target.title) 분석 완료 · TAB은 직접 입력"
             } catch {
                 guard !closed, analysisID == id else { return }
@@ -617,9 +634,8 @@ final class Workspace: ObservableObject {
         defer { if !retained { try? FileManager.default.removeItem(at: audio.directory) } }
         try requireCurrent(operation)
         if let preserving, preserving.events.contains(where: { $0.time >= audio.duration }) { throw ProjectError.invalidData }
-        var candidate = preserving ?? ScoreProject(title: url.deletingPathExtension().lastPathComponent, audioPath: url.path, duration: audio.duration)
-        if abs(candidate.duration - audio.duration) > 0.05 { candidate.analyses = [:] }
-        candidate.duration = audio.duration; candidate.audioPath = url.path
+        let base = preserving ?? ScoreProject(title: url.deletingPathExtension().lastPathComponent, duration: audio.duration)
+        let candidate = try base.relinkingOriginal(path: url.path, identity: audio.identity, duration: audio.duration)
         retained = true
         return StagedWorkspace(project: candidate, audio: audio,
             projectURL: preserving == nil ? nil : projectURL, baseline: preserving == nil ? nil : savedProject,
@@ -631,9 +647,16 @@ final class Workspace: ObservableObject {
         try requireCurrent(operation)
         var staged: StagedWorkspace
         if let path = loaded.audioPath, services.fileExists(URL(fileURLWithPath: path)) {
-            staged = try await stageAudio(URL(fileURLWithPath: path), preserving: loaded, operation: operation)
+            do {
+                staged = try await stageAudio(URL(fileURLWithPath: path), preserving: loaded, operation: operation)
+            } catch {
+                try requireCurrent(operation)
+                staged = StagedWorkspace(project: loaded, status: "오디오를 열지 못했습니다 · TAB은 오프라인으로 편집할 수 있습니다",
+                    offlineReason: error.localizedDescription)
+            }
         } else {
-            staged = StagedWorkspace(project: loaded, status: "오디오 경로를 찾을 수 없습니다 · 오디오 다시 연결을 사용하세요")
+            staged = StagedWorkspace(project: loaded, status: "오디오 경로를 찾을 수 없습니다 · TAB은 오프라인으로 편집할 수 있습니다",
+                offlineReason: "연결된 오디오를 찾을 수 없습니다")
         }
         staged.projectURL = url; staged.fromDisk = true; staged.baseline = loaded
         return staged
@@ -682,13 +705,23 @@ final class Workspace: ObservableObject {
                 staged = try await stageAudio(url, preserving: relink ? operation.snapshot : nil, operation: operation)
             case .project(let url): staged = try await stageProject(url, operation: operation)
             }
-            guard let staged else { return false }
+            guard var candidate = staged else { return false }
             try requireCurrent(operation)
-            let stagedPlayer = try preparePlayer(for: staged)
+            let stagedPlayer: AVAudioPlayer?
+            do { stagedPlayer = try preparePlayer(for: candidate) }
+            catch {
+                try requireCurrent(operation)
+                guard candidate.fromDisk, let decoded = candidate.baseline else { throw error }
+                if let audio = candidate.audio { try? FileManager.default.removeItem(at: audio.directory) }
+                candidate.project = decoded; candidate.audio = nil
+                candidate.offlineReason = error.localizedDescription
+                candidate.status = "오디오를 열지 못했습니다 · TAB은 오프라인으로 편집할 수 있습니다"
+                staged = candidate; stagedPlayer = nil
+            }
             // Player initialization can fail or reenter through an injected service.
             // Recheck ownership only after all fallible work and before touching old state.
             try requireCurrent(operation)
-            activate(staged, player: stagedPlayer)
+            activate(candidate, player: stagedPlayer)
             committed = true; loadProgress = 1
             return true
         } catch {
@@ -716,6 +749,8 @@ final class Workspace: ObservableObject {
         }
         demoURL = staged.demoURL ?? (previousDemo == staged.audio?.original ? previousDemo : nil)
         prepared = staged.audio; project = staged.project
+        audioConnection = staged.offlineReason.map { "오프라인 · " + $0 } ??
+            (staged.audio?.isMono == true ? "모노 연결됨 · L/R 동일" : "스테레오 연결됨 · 원본 L/R")
         projectIdentity = UUID(); projectURL = staged.projectURL; isDemo = staged.isDemo
         selectedID = nil; cursor = staged.isDemo ? 2 : 0; windowStart = 0
         positionDrag = nil; positionMagnetTargetID = nil; magnetDragInput = nil
@@ -759,6 +794,9 @@ final class Workspace: ObservableObject {
                 let copy = destination.deletingLastPathComponent().appendingPathComponent("RoughScore-demo-" + UUID().uuidString + ".wav")
                 try FileManager.default.copyItem(at: audio.original, to: copy)
                 copiedAudio = copy; saved.audioPath = copy.path
+                if let index = saved.assets?.firstIndex(where: { $0.role == .original }) {
+                    saved.assets?[index].reference = AudioReference(path: copy.path)
+                }
             }
             let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
             try services.writeProject(encoder.encode(saved), destination)
