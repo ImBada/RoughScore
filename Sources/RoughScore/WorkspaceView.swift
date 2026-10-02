@@ -64,7 +64,7 @@ struct WorkspaceView: View {
                 } }
                 if workspace.inspectorVisible {
                     Divider().overlay(Palette.border)
-                    NoteInspector(workspace: workspace).frame(width: 250)
+                    NoteInspector(workspace: workspace).frame(width: 250).disabled(!workspace.canMutateNotes)
                 }
             }
             .disabled(!workspace.canEdit)
@@ -237,7 +237,7 @@ struct WorkspaceView: View {
                 .help("새 음 입력에 적용 · 이동은 자유 드래그, Shift로 가까운 음에 정렬")
                 .disabled(workspace.scoreSummary?.beats.isEmpty ?? true)
             Button { workspace.undoEdit() } label: { Image(systemName: "arrow.uturn.backward") }.disabled(!workspace.canUndo).help("실행 취소 · ⌘Z")
-            Button { workspace.redoEdit() } label: { Image(systemName: "arrow.uturn.forward") }.disabled(!workspace.canRedo).help("다시 실행 · ⇧⌘Z")
+            Button { workspace.redoEdit() } label: { Image(systemName: "arrow.uturn.forward") }.disabled(!workspace.canRedo || workspace.positionDrag != nil).help("다시 실행 · ⇧⌘Z")
             Button { workspace.deleteSelected() } label: { Image(systemName: "trash") }.disabled(workspace.selected == nil).help("선택한 음 삭제 · Delete")
             Toggle("상세", isOn: $workspace.inspectorVisible).toggleStyle(.button).help("상세 편집 · I")
             Text(workspace.saveState.title).font(.system(size: 9)).foregroundStyle(Palette.secondary)
@@ -489,8 +489,7 @@ struct NoteInspector: View {
                 Divider()
                 VStack(alignment: .leading, spacing: 8) {
                     fieldLabel("위치 · 초")
-                    TextField("위치", value: binding(\.time, transform: { min(max(0, $0.isFinite ? $0 : 0), workspace.project.duration - 0.001) }), format: .number.precision(.fractionLength(3)))
-                        .textFieldStyle(.roundedBorder)
+                    PositionTimeField(workspace: workspace, event: event)
                     fieldLabel("기타 줄")
                     Picker("줄", selection: binding(\.string)) {
                         ForEach(1...6, id: \.self) { Text("\($0)번 · \(workspace.project.tuning[$0 - 1])").tag($0) }

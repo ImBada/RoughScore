@@ -70,22 +70,23 @@ struct PositionTimeField: View {
     @ObservedObject var workspace: Workspace
     let event: TabEvent
     @State private var text = ""
+    @State private var displayedText = ""
     @FocusState private var focused: Bool
     var body: some View {
         TextField("초", text: $text)
             .font(.system(size: 11, design: .monospaced)).textFieldStyle(.roundedBorder)
-            .frame(width: 82).focused($focused).help("초 단위 위치 입력 · Enter로 적용")
+            .frame(width: 82).focused($focused).disabled(!workspace.canMutateNotes).help("초 단위 위치 입력 · Enter로 적용")
             .onAppear { refresh() }
             .onChange(of: event.time) { _, _ in if !focused { refresh() } }
             .onSubmit { apply(); focused = false; workspace.requestKeyboardFocus?() }
             .onChange(of: focused) { previous, current in if previous && !current { apply() } }
     }
-    private func refresh() { text = String(format: "%.3f", event.time) }
+    private func refresh() {
+        let actual = workspace.project.events.first { $0.id == event.id }?.time ?? event.time
+        displayedText = String(format: "%.6f", actual); text = displayedText
+    }
     private func apply() {
-        guard workspace.selectedID == event.id else { return }
-        if let time = Double(text.replacingOccurrences(of: ",", with: ".")), time.isFinite {
-            workspace.moveSelectedPosition(to: time); workspace.revealSelectedPosition()
-        }
-        text = String(format: "%.3f", workspace.selected?.time ?? event.time)
+        _ = workspace.applyPositionTimeInput(text, displayed: displayedText, eventID: event.id)
+        refresh()
     }
 }
