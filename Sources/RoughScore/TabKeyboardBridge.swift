@@ -28,6 +28,10 @@ final class TabKeyboardView: NSView {
         guard let workspace, !event.modifierFlags.contains(.command), !event.modifierFlags.contains(.control) else {
             super.keyDown(with: event); return
         }
+        guard workspace.canEdit else {
+            if event.keyCode == 53 { workspace.cancelLoading() }
+            return
+        }
         let text = event.charactersIgnoringModifiers?.lowercased() ?? ""
         if text.count == 1, let digit = Int(text), (0...9).contains(digit), !event.modifierFlags.contains(.option) {
             workspace.inputDigit(digit, at: event.timestamp); return

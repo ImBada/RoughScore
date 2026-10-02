@@ -32,8 +32,10 @@ enum AudioIssue: LocalizedError {
 
 enum AudioPreparation {
     /// Decode in bounded chunks and preserve each original channel. This is not source separation.
-    static func prepare(_ url: URL) async throws -> PreparedAudio {
+    static func prepare(_ url: URL, progress: @escaping @Sendable (Double) async -> Void = { _ in }) async throws -> PreparedAudio {
         let task = Task.detached(priority: .userInitiated) {
+            try Task.checkCancellation()
+            await progress(0)
             let file = try AVAudioFile(forReading: url, commonFormat: .pcmFormatFloat32, interleaved: false)
             let format = file.processingFormat
             guard (1...2).contains(format.channelCount), file.length > 0,
@@ -73,7 +75,9 @@ enum AudioPreparation {
                     for i in 0..<Int(input.frameLength) { destination[0][i] = channels[rightIndex][i] }
                     try rightFile.write(from: output)
                     offset += Int64(input.frameLength)
+                    await progress(Double(offset) / Double(file.length))
                 }
+                try Task.checkCancellation()
                 return PreparedAudio(original: url, left: leftURL, right: rightURL, directory: directory,
                                      duration: duration, isMono: format.channelCount == 1,
                                      leftPeaks: leftPeaks, rightPeaks: rightPeaks)
@@ -86,6 +90,7 @@ enum AudioPreparation {
     }
 
     static func createDemo(project: ScoreProject = .demo) throws -> URL {
+        try Task.checkCancellation()
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("RoughScore-demo-" + UUID().uuidString + ".wav")
         let sampleRate = 44_100.0
         let format = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 2)!
@@ -95,20 +100,29 @@ enum AudioPreparation {
         let channels = buffer.floatChannelData!
         for channel in 0..<2 { channels[channel].initialize(repeating: 0, count: count) }
         for event in project.events {
+            try Task.checkCancellation()
             guard let fret = event.fret, let midi = TabMath.midi(string: event.string, fret: fret) else { continue }
             let frequency = 440 * pow(2, Double(midi - 69) / 12)
             let channel = event.lane == .left ? 0 : 1
             let start = Int(event.time * sampleRate)
             for i in 0..<Int(sampleRate * 1.4) where start + i < count {
+                if i % 8192 == 0 { try Task.checkCancellation() }
                 let t = Double(i) / sampleRate
                 let attack = min(1, t / 0.005)
                 let tone = sin(2 * .pi * frequency * t) + 0.3 * sin(4 * .pi * frequency * t)
                 channels[channel][start + i] += Float(0.24 * attack * exp(-t * 5) * tone)
             }
         }
-        let file = try AVAudioFile(forWriting: url, settings: format.settings)
-        try file.write(from: buffer)
-        return url
+        do {
+            try Task.checkCancellation()
+            let file = try AVAudioFile(forWriting: url, settings: format.settings)
+            try file.write(from: buffer)
+            try Task.checkCancellation()
+            return url
+        } catch {
+            try? FileManager.default.removeItem(at: url)
+            throw error
+        }
     }
 }
 

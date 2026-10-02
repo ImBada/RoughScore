@@ -20,8 +20,16 @@ struct WorkspaceView: View {
     @ObservedObject var workspace: Workspace
     var body: some View {
         VStack(spacing: 0) {
-            topBar
+            topBar.disabled(!workspace.canEdit)
             Divider().overlay(Palette.border)
+            if workspace.busy {
+                HStack {
+                    ProgressView(value: workspace.loadProgress).frame(maxWidth: 280)
+                    Text("오디오 준비 \(Int(workspace.loadProgress * 100))%")
+                    Spacer()
+                    Button("취소") { workspace.cancelLoading() }
+                }.font(.system(size: 12)).padding(12)
+            }
             HStack(spacing: 0) {
                 sidebar.frame(width: 210)
                 Divider().overlay(Palette.border)
@@ -57,6 +65,7 @@ struct WorkspaceView: View {
                     NoteInspector(workspace: workspace).frame(width: 250)
                 }
             }
+            .disabled(!workspace.canEdit)
             Divider().overlay(Palette.border)
             HStack(spacing: 8) {
                 Circle().fill(workspace.busy || workspace.analyzing ? .orange : Palette.mint).frame(width: 5, height: 5)
@@ -153,8 +162,8 @@ struct WorkspaceView: View {
                 Button("프로젝트 열기") { workspace.openProject() }
                 Spacer()
                 Menu("데모") {
-                    Button("짧은 데모 · 24초") { Task { await workspace.loadDemo() } }
-                    Button("긴 곡 데모 · 3분") { Task { await workspace.loadDemo(long: true) } }
+                    Button("짧은 데모 · 24초") { workspace.loadDemo() }
+                    Button("긴 곡 데모 · 3분") { workspace.loadDemo(long: true) }
                 }
             }.font(.system(size: 10)).buttonStyle(.borderless).disabled(workspace.busy || workspace.analyzing)
         }.padding(18).background(Palette.panel)

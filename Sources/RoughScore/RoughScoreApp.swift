@@ -9,6 +9,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.activate(ignoringOtherApps: true)
     }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        workspace?.cancelLoading()
         guard workspace?.confirmDiscard() ?? true else { return .terminateCancel }
         workspace?.shutdown()
         return .terminateNow
@@ -17,14 +18,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
 @main
 struct RoughScoreApp: App {
-    @StateObject private var workspace = Workspace()
+    @StateObject private var workspace = Workspace(awaitsStartup: true)
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
     var body: some Scene {
         Window("RoughScore", id: "main") {
             WorkspaceView(workspace: workspace)
                 .frame(minWidth: 1120, minHeight: 740)
                 .preferredColorScheme(.dark)
-                .task { delegate.workspace = workspace; await workspace.start() }
+                .task { delegate.workspace = workspace; workspace.start() }
         }
         .defaultSize(width: 1440, height: 900)
         .commands {
