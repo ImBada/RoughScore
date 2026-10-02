@@ -131,3 +131,10 @@ Both actual SDK CI jobs and a different reviewer's approval of the exact head
 are required before root merges. Later UI/history acceptance remains with #8,
 including one-undo application, collision display/gesture integration, cursor
 paste/duplicate commands and system pasteboard ownership.
+
+Local validation on accepted main8a53e3e3a81962fd854a76f6e164de7816a36ea5:
+123 Swift tests in13 suites, including16 BulkEditTests, passed; release build
+passed;33 evaluator and7 CI-helper Python tests passed. Exact memo UTF-8 bytes
+(including decomposed Unicode) and no-op negative-zero timestamp bits are checked.
+This is core/schema verification only; GUI and actual one-undo behavior remain
+for the #8 integration owner.

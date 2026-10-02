@@ -13,7 +13,7 @@ struct BulkEditTests {
         // Intentionally unsorted storage, simultaneous chord notes, both lanes,
         // unknown fret/rhythm and a Korean memo: timing is authored independently.
         var project = ScoreProject(title: "수동 원본", audioPath: "/fixture/generated.wav", duration: 12, events: [
-            TabEvent(id: Self.c, time: 3.75, lane: .right, string: 2, fret: 8, length: .eighth, tentative: true, memo: "다시 듣기 🎸"),
+            TabEvent(id: Self.c, time: 3.75, lane: .right, string: 2, fret: 8, length: .eighth, tentative: true, memo: "다시 듣기 🎸 e\u{301}"),
             TabEvent(id: Self.a, time: 3.125, lane: .left, string: 6, fret: 0, memo: "low E"),
             TabEvent(id: Self.b, time: 3.125, lane: .left, string: 4, fret: nil, length: nil, tentative: true, memo: "음고 모름"),
             TabEvent(id: Self.unrelated, time: 8, lane: .right, string: 1, fret: 24, length: .quarter, memo: "untouched")
@@ -58,6 +58,7 @@ struct BulkEditTests {
         for (source, target) in zip(original.events.prefix(3), pasted) {
             #expect(source.string == target.string && source.fret == target.fret)
             #expect(source.length == target.length && source.tentative == target.tentative && source.memo == target.memo)
+            #expect(source.memo.utf8.elementsEqual(target.memo.utf8))
         }
         #expect(result.pastedSelection?.primaryID == pasted[2].id)
         expectMetadata(result.project, equals: original)
@@ -182,6 +183,9 @@ struct BulkEditTests {
         #expect(try !TabEditCommand.setLength(selection: sameLength, length: .eighth).apply(to: project).changed)
         let stale = try TabSelection(ids: [Self.absent])
         #expect(throws: TabEditError.staleSelection(Self.absent)) { try TabEditCommand.move(selection: stale, timeDelta: 0).apply(to: project) }
+        var signedZero = project; signedZero.events[0].time = -0.0
+        let preserved = try TabEditCommand.move(selection: sameLength, timeDelta: 0).apply(to: signedZero)
+        #expect(!preserved.changed && preserved.project.events[0].time.bitPattern == (-0.0).bitPattern)
     }
 
     @Test func pasteBoundsAndUUIDCollisionRejectWithoutPartialMutation() throws {
