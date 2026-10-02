@@ -1,0 +1,7 @@
+# actionlint 1.7.12 predates this official hosted public-preview label.
+# Explicitly permit only the label documented in actions/runner-images:
+# https://github.com/actions/runner-images/blob/main/images/macos/xcode-27-arm64-Readme.md
+# The config key is named self-hosted-runner by actionlint; the job is hosted.
+self-hosted-runner:
+  labels:
+    - xcode-27

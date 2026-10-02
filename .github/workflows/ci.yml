@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: ${{ matrix.lane }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Explicit paths from actions/runner-images; fail if the image changes.
+          - lane: macOS 15 / Xcode 16.4 / analysis fallback
+            runner: macos-15
+            developer-dir: /Applications/Xcode_16.4.app/Contents/Developer
+            analysis: disabled
+          # This is the official public-preview label, not macos-27.
+          - lane: macOS 27 / Xcode 27 / analysis enabled
+            runner: xcode-27
+            developer-dir: /Applications/Xcode_27.app/Contents/Developer
+            analysis: enabled
+    env:
+      DEVELOPER_DIR: ${{ matrix.developer-dir }}
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Check helper contracts
+        run: |
+          bash -n scripts/ci/run.sh
+          python3 -m unittest discover -s scripts/ci -p 'test_*.py' -v
+      - name: Test generated audio and build release
+        run: bash scripts/ci/run.sh "$RUNNER_TEMP/roughscore-ci" '${{ matrix.analysis }}'
+      - name: Publish verification summary
+        if: always()
+        run: |
+          if [[ -f "$RUNNER_TEMP/roughscore-ci/summary.md" ]]; then
+            cat "$RUNNER_TEMP/roughscore-ci/summary.md" >> "$GITHUB_STEP_SUMMARY"
+          else
+            printf '%s\n' 'Verification did not complete; inspect the failed step and retained logs. No passing coverage is claimed.' >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Retain generated-fixture verification logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: verification-${{ matrix.runner }}
+          path: |
+            ${{ runner.temp }}/roughscore-ci/*.log
+            ${{ runner.temp }}/roughscore-ci/*.json
+            ${{ runner.temp }}/roughscore-ci/*.md
+            ${{ runner.temp }}/roughscore-ci/fixture/manifest.json
+          if-no-files-found: warn
+          retention-days: 7
