@@ -1,0 +1,97 @@
+{
+  "schema_version": 1,
+  "name": "GuitarSet 1.1.0 pinned acoustic smoke references (not engine predictions)",
+  "cases": [
+    {
+      "id": "guitarset-00_BN3-119-G_solo-clean_mono",
+      "slice": "clean_mono",
+      "material": "real",
+      "source": "https://zenodo.org/records/3371780",
+      "license": "CC-BY-4.0",
+      "reference_method": "GuitarSet v1.1.0 note_midi JAMS annotations; MIDI rounded to nearest semitone; onset/end preserved; reference-only 5 s polyphony selection, first valid performer-00 track",
+      "audio_origin_in_source_seconds": 16.0,
+      "audio_input": {
+        "path": "downloads/guitarset/cases/guitarset-00_BN3-119-G_solo-clean_mono/input.wav",
+        "sha256": "8b409d4017f22aeba4a909d3f71cf10c7e3c5cc909364b68ff7033c0a6511166"
+      },
+      "notes_reference": {
+        "path": "References/guitarset-00_BN3-119-G_solo-clean_mono.json",
+        "sha256": "32c05911af9227251860b96dc0216a010c1fde8d334f94ff85577dfe4c12da1a"
+      },
+      "source_annotations": {
+        "path": "downloads/guitarset/cases/guitarset-00_BN3-119-G_solo-clean_mono/source.jams",
+        "sha256": "5c64a85cce813c593d957f50bed8244f4eb539f0bd97d97fd7d18cd3206247ad"
+      },
+      "limitations": "Acoustic microphone recording only; one deterministic window is smoke/reference coverage, not a representative frozen benchmark or unseen-data claim."
+    },
+    {
+      "id": "guitarset-00_BN1-129-Eb_comp-clean_chords",
+      "slice": "clean_chords",
+      "material": "real",
+      "source": "https://zenodo.org/records/3371780",
+      "license": "CC-BY-4.0",
+      "reference_method": "GuitarSet v1.1.0 note_midi JAMS annotations; MIDI rounded to nearest semitone; onset/end preserved; reference-only 5 s polyphony selection, first valid performer-00 track",
+      "audio_origin_in_source_seconds": 0.0,
+      "audio_input": {
+        "path": "downloads/guitarset/cases/guitarset-00_BN1-129-Eb_comp-clean_chords/input.wav",
+        "sha256": "8494b9167d5baafcbee96454f295f9c568f1197b9abbb9783f656f5fd399ee66"
+      },
+      "notes_reference": {
+        "path": "References/guitarset-00_BN1-129-Eb_comp-clean_chords.json",
+        "sha256": "7e13661907ed0cf3be60db1d26e509fa94432e98a9a7ff51e1ef7158db97fed3"
+      },
+      "source_annotations": {
+        "path": "downloads/guitarset/cases/guitarset-00_BN1-129-Eb_comp-clean_chords/source.jams",
+        "sha256": "cd79564c51d0dec7d04e010d31525e9f7d2b9d41cf6116118a66ac5a8c181007"
+      },
+      "limitations": "Acoustic microphone recording only; one deterministic window is smoke/reference coverage, not a representative frozen benchmark or unseen-data claim."
+    }
+  ],
+  "acquisition_receipt": "guitarset-reference-lock.json",
+  "unavailable": [],
+  "dataset": {
+    "schema_version": 1,
+    "dataset": "GuitarSet",
+    "version": "1.1.0",
+    "source": "https://zenodo.org/records/3371780",
+    "metadata_source": "https://zenodo.org/api/records/3371780",
+    "license": "CC-BY-4.0",
+    "license_url": "https://creativecommons.org/licenses/by/4.0/",
+    "attribution": "GuitarSet: Qingyang Xi, Rachel M. Bittner, Johan Pauwels, Xuzhou Ye and Juan P. Bello (2018), DOI 10.5281/zenodo.3371780. Derived smoke windows/reference JSON retain attribution and record crop/MIDI rounding changes.",
+    "reference_method": "Published hexaphonic-pickup-derived note_midi JAMS and pitch-contour annotations, paired with microphone audio; annotations are fallible, not independently hand-verified by RoughScore.",
+    "archives": [
+      {
+        "name": "annotation.zip",
+        "url": "https://zenodo.org/api/records/3371780/files/annotation.zip/content",
+        "size_bytes": 39132574,
+        "md5": "b39b78e63d3446f2e54ddb7a54df9b10",
+        "sha256": "8daa02e6417ccca1685feb44b135e95928ad7037e5032ecb326b5791856fda99",
+        "sha256_source": "RoughScore explicit acquisition from official Zenodo file, verified against publisher size/MD5; not a publisher-provided SHA256"
+      },
+      {
+        "name": "audio_mono-mic.zip",
+        "url": "https://zenodo.org/api/records/3371780/files/audio_mono-mic.zip/content",
+        "size_bytes": 656927981,
+        "md5": "275966d6610ac34999b58426beb119c3",
+        "sha256": "237cdc58353d25c3c9683f4565a0f1cf2db30a9051abca545a919f8f1296dc28",
+        "sha256_source": "RoughScore explicit acquisition from official Zenodo file, verified against publisher size/MD5; not a publisher-provided SHA256"
+      }
+    ],
+    "excluded_tracks": [
+      "04_BN3-154-E_comp",
+      "04_Jazz1-200-B_comp",
+      "02_Funk2-119-G_comp"
+    ],
+    "exclusion_policy": "Exclude two constant annotation shifts reported in primary issue #5 and duplicated-note track reported in issue #4; do not silently repair. Smoke selection is restricted to performer 00, distinct from these errors, and is not a representative frozen benchmark.",
+    "known_error_sources": [
+      "https://github.com/marl/GuitarSet/issues/5",
+      "https://github.com/marl/GuitarSet/issues/4"
+    ],
+    "limitations": [
+      "Acoustic recordings do not supply distorted/dual-guitar band-mix reference stems.",
+      "Basic Pitch's training configuration includes GuitarSet; evaluating that model here is not necessarily held-out evidence.",
+      "Archive MD5 is the publisher integrity checksum; fetched/derived members also receive SHA256 in the receipt."
+    ]
+  },
+  "benchmark_status": "SMOKE_REFERENCE_ONLY; not representative quality-release evidence"
+}
