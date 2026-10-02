@@ -28,7 +28,21 @@ final class Workspace: ObservableObject {
     @Published var status = "데모 준비 중"
     @Published var error: String?
     @Published var isDemo = true
+    @Published private(set) var saveState: SaveState = .unsaved
     @Published var dirty = false
+    enum SaveState: Equatable {
+        case unsaved, pending, saving, saved, failed, cancelled
+        var title: String {
+            switch self {
+            case .unsaved: "미저장 · ⌘S"
+            case .pending: "변경됨 · 자동 저장 대기"
+            case .saving: "저장 중…"
+            case .saved: "저장됨"
+            case .failed: "저장 실패 · 미저장"
+            case .cancelled: "저장 취소 · 미저장"
+            }
+        }
+    }
     @Published var scoreView = true
     @Published var measuresPerSystem = 4
     @Published var scorePage = 0
@@ -58,6 +72,7 @@ final class Workspace: ObservableObject {
     private var savedProject: ScoreProject?
     private var autosaveTask: Task<Void, Never>?
     private var projectURL: URL?
+    private var projectRevision: UInt64 = 0
     private var player: AVAudioPlayer?
     private var timer: Timer?
     private var analysisTask: Task<Void, Never>?
@@ -86,7 +101,7 @@ final class Workspace: ObservableObject {
         var demoURL: URL?
         var isDemo = false
         var fromDisk = false
-        var dirty = false
+        var baseline: ScoreProject?
         var status: String
     }
 
@@ -475,17 +490,26 @@ final class Workspace: ObservableObject {
         changed(); requestKeyboardFocus?()
     }
     private func changed() {
-        dirty = savedProject.map { project != $0 } ?? true
+        projectRevision &+= 1
+        refreshSaveState()
         scheduleAutosave()
     }
+    private func refreshSaveState() {
+        dirty = savedProject.map { project != $0 } ?? true
+        saveState = dirty ? (projectURL == nil ? .unsaved : .pending) : (projectURL == nil ? .unsaved : .saved)
+    }
     private func scheduleAutosave() {
-        autosaveTask?.cancel()
-        guard !closed, projectURL != nil else { return }
+        autosaveTask?.cancel(); autosaveTask = nil
+        guard !closed, dirty, let url = projectURL else { return }
+        let identity = projectIdentity, revision = projectRevision
         autosaveTask = Task { [weak self] in
             do { try await Task.sleep(for: .milliseconds(800)) } catch { return }
-            guard let self, !Task.isCancelled, self.canEdit, self.dirty, let url = self.projectURL else { return }
-            do { try self.persist(to: url) }
-            catch { self.error = error.localizedDescription }
+            guard let self, !Task.isCancelled, !self.closed,
+                  self.projectIdentity == identity, self.projectRevision == revision,
+                  self.projectURL == url, self.dirty else { return }
+            // A load pauses saving; its completion/cancellation always resumes the retained revision.
+            guard self.canEdit else { return }
+            _ = self.save(to: url)
         }
     }
 
@@ -598,7 +622,7 @@ final class Workspace: ObservableObject {
         candidate.duration = audio.duration; candidate.audioPath = url.path
         retained = true
         return StagedWorkspace(project: candidate, audio: audio,
-            projectURL: preserving == nil ? nil : projectURL, dirty: preserving != nil,
+            projectURL: preserving == nil ? nil : projectURL, baseline: preserving == nil ? nil : savedProject,
             status: audio.isMono ? "모노 파일 · L/R에는 같은 소리가 들어 있습니다" : "스테레오 준비 완료 · 채널별로 듣고 필요한 음을 남기세요")
     }
 
@@ -611,7 +635,7 @@ final class Workspace: ObservableObject {
         } else {
             staged = StagedWorkspace(project: loaded, status: "오디오 경로를 찾을 수 없습니다 · 오디오 다시 연결을 사용하세요")
         }
-        staged.projectURL = url; staged.fromDisk = true
+        staged.projectURL = url; staged.fromDisk = true; staged.baseline = loaded
         return staged
     }
 
@@ -623,6 +647,7 @@ final class Workspace: ObservableObject {
         try requireCurrent(operation)
         var staged = try await stageAudio(url, preserving: demoProject, operation: operation)
         staged.projectURL = nil; staged.demoURL = url; staged.isDemo = true
+        staged.baseline = staged.project // An untouched built-in example is not a user edit.
         staged.status = "합성 오디오 + 수동 TAB 예시 · 자동 채보 결과가 아닙니다"
         retained = true
         return staged
@@ -699,40 +724,59 @@ final class Workspace: ObservableObject {
         loopStart = staged.isDemo ? 2 : 0; loopEnd = staged.isDemo ? 6 : min(project.duration, 4)
         looping = false; source = .stereo
         player = stagedPlayer
-        dirty = !staged.fromDisk && !staged.isDemo && staged.dirty
-        savedProject = project
+        projectRevision &+= 1
+        savedProject = staged.baseline
+        refreshSaveState()
         if staged.fromDisk, let url = projectURL { services.rememberProject(url) }
         status = staged.status; requestKeyboardFocus?()
     }
 
     func save() {
+        // Dirty projects with a location resume autosave when the transition releases its reservation.
         guard canEdit else { return }
-        var destination = projectURL
-        if destination == nil {
-            let panel = NSSavePanel()
-            panel.nameFieldStringValue = project.title
-            panel.allowedContentTypes = [UTType(filenameExtension: "roughscore") ?? .json]
-            guard panel.runModal() == .OK else { return }
-            destination = panel.url
+        let identity = projectIdentity
+        let destination = projectURL ?? services.chooseSaveDestination(project.title)
+        guard !closed, projectIdentity == identity else { return }
+        guard let destination else {
+            if dirty { saveState = .cancelled }
+            return
         }
-        guard let destination else { return }
-        do {
-            autosaveTask?.cancel()
-            try persist(to: destination); status = "프로젝트 저장 완료 · 이후 입력은 자동 저장"
-        } catch { self.error = error.localizedDescription }
+        if save(to: destination) { status = "프로젝트 저장 완료 · 이후 입력은 자동 저장" }
     }
 
-    private func persist(to destination: URL) throws {
-        var saved = try project.validated()
-        if isDemo, let audio = prepared, saved.audioPath == demoURL?.path {
-            let copy = destination.deletingLastPathComponent().appendingPathComponent("RoughScore-demo-" + UUID().uuidString + ".wav")
-            try FileManager.default.copyItem(at: audio.original, to: copy)
-            saved.audioPath = copy.path
+    /// URL seam shares the same atomic save transaction as the panel and autosave paths.
+    @discardableResult
+    func save(to destination: URL) -> Bool {
+        guard canEdit else { return false }
+        autosaveTask?.cancel(); autosaveTask = nil
+        let identity = projectIdentity, revision = projectRevision
+        let snapshot = project
+        var copiedAudio: URL?
+        saveState = .saving
+        do {
+            var saved = try snapshot.validated()
+            if isDemo, let audio = prepared, saved.audioPath == demoURL?.path {
+                let copy = destination.deletingLastPathComponent().appendingPathComponent("RoughScore-demo-" + UUID().uuidString + ".wav")
+                try FileManager.default.copyItem(at: audio.original, to: copy)
+                copiedAudio = copy; saved.audioPath = copy.path
+            }
+            let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            try services.writeProject(encoder.encode(saved), destination)
+            guard !closed, projectIdentity == identity else { return false }
+            // Reentrant injected services cannot make a newer revision falsely clean.
+            if projectRevision == revision, project == snapshot { project = saved }
+            savedProject = saved; projectURL = destination
+            refreshSaveState()
+            services.rememberProject(destination)
+            if dirty { scheduleAutosave() }
+            return true
+        } catch {
+            if let copiedAudio { try? FileManager.default.removeItem(at: copiedAudio) }
+            guard !closed, projectIdentity == identity else { return false }
+            dirty = savedProject.map { project != $0 } ?? true
+            saveState = .failed; self.error = error.localizedDescription
+            return false
         }
-        let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        try encoder.encode(saved).write(to: destination, options: .atomic)
-        project = saved; savedProject = saved; projectURL = destination; dirty = false
-        services.rememberProject(destination)
     }
 
     func openProject() {
