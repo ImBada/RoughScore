@@ -1,0 +1,31 @@
+import Foundation
+import RoughScoreCore
+
+/// Async boundaries are injected so late, failed and cancellation-ignoring services can be tested.
+struct WorkspaceServices: Sendable {
+    var prepare: @Sendable (URL, @escaping @Sendable (Double) async -> Void) async throws -> PreparedAudio
+    var createDemo: @Sendable (ScoreProject) async throws -> URL
+    var readProject: @Sendable (URL) async throws -> ScoreProject
+    var analyze: @Sendable (URL, Double) async throws -> AnalysisSummary
+    var fileExists: @Sendable (URL) -> Bool
+    var lastProject: @MainActor @Sendable () -> URL?
+    var rememberProject: @MainActor @Sendable (URL) -> Void
+
+    static let live = WorkspaceServices(
+        prepare: { try await AudioPreparation.prepare($0, progress: $1) },
+        createDemo: { project in
+            let task = Task.detached(priority: .userInitiated) { try AudioPreparation.createDemo(project: project) }
+            return try await withTaskCancellationHandler { try await task.value } onCancel: { task.cancel() }
+        },
+        readProject: { url in
+            let task = Task.detached(priority: .userInitiated) {
+                try JSONDecoder().decode(ScoreProject.self, from: Data(contentsOf: url)).validated()
+            }
+            return try await withTaskCancellationHandler { try await task.value } onCancel: { task.cancel() }
+        },
+        analyze: { try await AppleMusicAnalysis.analyze($0, duration: $1) },
+        fileExists: { FileManager.default.fileExists(atPath: $0.path) },
+        lastProject: { UserDefaults.standard.string(forKey: "lastProjectPath").map { URL(fileURLWithPath: $0) } },
+        rememberProject: { UserDefaults.standard.set($0.path, forKey: "lastProjectPath") }
+    )
+}

@@ -22,7 +22,8 @@ final class Workspace: ObservableObject {
     @Published var rate: Float = 1 { didSet { player?.rate = rate } }
     @Published var showLengths = false
     @Published var snapToBeat = false
-    @Published var busy = false
+    @Published private(set) var busy = false
+    @Published private(set) var loadProgress = 0.0
     @Published var analyzing = false
     @Published var status = "데모 준비 중"
     @Published var error: String?
@@ -61,6 +62,43 @@ final class Workspace: ObservableObject {
     private var timer: Timer?
     private var analysisTask: Task<Void, Never>?
     private var demoURL: URL?
+    private let services: WorkspaceServices
+    private var startupPending: Bool
+    private var started = false
+    private var closed = false
+    private var projectIdentity = UUID()
+    private var loadTask: Task<Bool, Never>?
+    private var loadOperation: LoadOperation?
+    private var analysisID: UUID?
+
+    private struct LoadOperation: Sendable {
+        let id = UUID()
+        let projectID: UUID
+        let snapshot: ScoreProject
+    }
+    private enum LoadRequest: Sendable {
+        case startup, demo(Bool), audio(URL, Bool), project(URL)
+    }
+    private struct StagedWorkspace: Sendable {
+        var project: ScoreProject
+        var audio: PreparedAudio?
+        var projectURL: URL?
+        var demoURL: URL?
+        var isDemo = false
+        var fromDisk = false
+        var dirty = false
+        var status: String
+    }
+
+    init(services: WorkspaceServices = .live, awaitsStartup: Bool = false) {
+        self.services = services
+        startupPending = awaitsStartup
+        busy = awaitsStartup
+    }
+
+    var canEdit: Bool { !busy && !closed }
+    var canLoad: Bool { canEdit && !analyzing }
+
 
     var windowEnd: Double { min(project.duration, windowStart + windowLength) }
     var visibleEvents: [TabEvent] {
@@ -86,14 +124,16 @@ final class Workspace: ObservableObject {
         return false
     }
 
-    func start() async {
-        guard timer == nil else { return }
+    /// Reserve startup before returning to SwiftUI; the app also locks its initial view before .task runs.
+    @discardableResult
+    func start() -> Task<Bool, Never>? {
+        guard !started, !closed else { return nil }
+        started = true
         timer = Timer.scheduledTimer(withTimeInterval: 0.03, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.tick() }
         }
-        if let path = UserDefaults.standard.string(forKey: "lastProjectPath"), FileManager.default.fileExists(atPath: path),
-           await loadProject(at: URL(fileURLWithPath: path)) { return }
-        await loadDemo()
+        guard let operation = reserveLoad() else { return nil }
+        return launchLoad(.startup, operation: operation)
     }
 
     private func tick() {
@@ -122,12 +162,14 @@ final class Workspace: ObservableObject {
     }
 
     func seekForEditing(_ time: Double, lane: GuitarLane? = nil) {
+        guard canEdit else { return }
         fretEntry.reset(); newlyCreatedID = nil; selectedID = nil
         if let lane { selectLane(lane) }
         jumpToScoreTime(time); requestKeyboardFocus?()
         status = "\(clockLabel(cursor)) · \(activeString)번 줄에 숫자로 입력 · 파형 드래그로 반복"
     }
     func selectLane(_ value: GuitarLane) {
+        guard canEdit else { return }
         lane = value
         if source != .stereo { switchSource(value == .left ? .left : .right) }
     }
@@ -153,6 +195,7 @@ final class Workspace: ObservableObject {
     }
 
     func togglePlayback() {
+        guard canEdit else { return }
         guard let player else { return }
         if playing { player.pause(); playing = false }
         else {
@@ -162,6 +205,7 @@ final class Workspace: ObservableObject {
     }
 
     func switchSource(_ value: ListeningSource) {
+        guard canEdit else { return }
         let previousLayout = scoreLayout
         let resume = playing
         player?.pause(); playing = false; source = value
@@ -188,16 +232,19 @@ final class Workspace: ObservableObject {
     }
 
     func setLoopStart() {
+        guard canEdit else { return }
         loopStart = min(cursor, max(0, project.duration - 0.05))
         if loopEnd <= loopStart { loopEnd = min(project.duration, loopStart + 4) }
         looping = true
     }
     func setLoopEnd() {
+        guard canEdit else { return }
         loopEnd = min(project.duration, max(loopStart + 0.05, cursor))
         looping = true
     }
 
     func setLoop(from start: Double, to end: Double) {
+        guard canEdit else { return }
         guard start.isFinite, end.isFinite else { return }
         loopStart = min(max(0, min(start, end)), max(0, project.duration - 0.05))
         loopEnd = min(project.duration, max(loopStart + 0.05, max(start, end)))
@@ -207,6 +254,7 @@ final class Workspace: ObservableObject {
     }
 
     func addEvent(time: Double, string: Int) {
+        guard canEdit else { return }
         activeString = string
         let snapped = TabMath.snap(time, beats: scoreSummary?.beats ?? [], enabled: snapToBeat)
         let actual = min(max(0, snapped), project.duration - 0.001)
@@ -222,6 +270,7 @@ final class Workspace: ObservableObject {
     }
 
     func select(_ event: TabEvent) {
+        guard canEdit else { return }
         fretEntry.reset(); newlyCreatedID = nil
         selectedID = event.id; activeString = event.string; selectLane(event.lane); jumpToScoreTime(event.time)
         requestKeyboardFocus?()
@@ -229,6 +278,7 @@ final class Workspace: ObservableObject {
     }
 
     func inputDigit(_ digit: Int, at time: Double = ProcessInfo.processInfo.systemUptime) {
+        guard canEdit else { return }
         guard positionDrag == nil else { return }
         guard (0...9).contains(digit), time.isFinite else { return }
         if selectedID == nil { addEvent(time: cursor, string: activeString) }
@@ -244,6 +294,7 @@ final class Workspace: ObservableObject {
     }
 
     func updateSelected(_ change: (inout TabEvent) -> Void) {
+        guard canEdit else { return }
         guard let index = project.events.firstIndex(where: { $0.id == selectedID }) else { return }
         recordUndo(); fretEntry.reset(); newlyCreatedID = nil
         change(&project.events[index]); changed()
@@ -253,6 +304,7 @@ final class Workspace: ObservableObject {
         positionDrag?.id == event.id ? positionDrag! : event
     }
     func beginPositionDrag(_ event: TabEvent) {
+        guard canEdit else { return }
         guard !busy, let actual = project.events.first(where: { $0.id == event.id }) else { return }
         fretEntry.reset(); newlyCreatedID = nil
         selectedID = actual.id; lane = actual.lane; activeString = actual.string
@@ -261,6 +313,7 @@ final class Workspace: ObservableObject {
         requestKeyboardFocus?()
     }
     func previewPositionDrag(time: Double, string: Int, snap: Bool = true) {
+        guard canEdit else { return }
         guard time.isFinite, var preview = positionDrag else { return }
         positionMagnetTargetID = nil; magnetDragInput = nil
         let snapped = TabMath.snap(time, beats: scoreSummary?.beats ?? [], enabled: snap && snapToBeat)
@@ -271,6 +324,7 @@ final class Workspace: ObservableObject {
     }
 
     func previewMagneticPosition(time: Double, string: Int, screenX: Double, anchors: [NoteMagnetAnchor], shift: Bool) {
+        guard canEdit else { return }
         guard time.isFinite, let dragged = positionDrag else { return }
         let candidates = anchors.compactMap { anchor -> NoteMagnetAnchor? in
             guard anchor.id != dragged.id,
@@ -280,6 +334,7 @@ final class Workspace: ObservableObject {
         applyMagnet(MagnetDragInput(time: time, string: string, screenX: screenX, anchors: candidates), shift: shift)
     }
     func updatePositionModifiers(shift: Bool) {
+        guard canEdit else { return }
         guard positionDrag != nil, let input = magnetDragInput else { return }
         applyMagnet(input, shift: shift)
     }
@@ -293,6 +348,7 @@ final class Workspace: ObservableObject {
         }
     }
     func commitPositionDrag() {
+        guard canEdit else { return }
         guard let preview = positionDrag, let index = project.events.firstIndex(where: { $0.id == preview.id }) else {
             positionDrag = nil; positionMagnetTargetID = nil; magnetDragInput = nil; return
         }
@@ -309,6 +365,7 @@ final class Workspace: ObservableObject {
         status = "\(String(format: "%.3f", preview.time))초로 이동 · ⌘Z 취소 · Shift+Space로 듣기"
     }
     func cancelPositionDrag() {
+        guard canEdit else { return }
         positionDrag = nil; positionMagnetTargetID = nil; magnetDragInput = nil
         requestKeyboardFocus?()
     }
@@ -338,11 +395,13 @@ final class Workspace: ObservableObject {
         windowStart = min(max(0, center - windowLength / 2), max(0, project.duration - windowLength))
     }
     func auditionSelected() {
+        guard canEdit else { return }
         guard let selected else { return }
         seek(selected.time)
         if !playing { togglePlayback() }
     }
     func deleteSelected() {
+        guard canEdit else { return }
         cancelPositionDrag()
         guard selected != nil else { return }
         recordUndo()
@@ -352,6 +411,7 @@ final class Workspace: ObservableObject {
     }
 
     func moveSelectedString(by delta: Int) {
+        guard canEdit else { return }
         guard let selected else {
             activeString = min(6, max(1, activeString + delta))
             status = "편집 줄 \(activeString)번 · 숫자를 입력하면 현재 위치에 기록"
@@ -364,6 +424,7 @@ final class Workspace: ObservableObject {
         status = "\(string)번 줄 · \(selected.fret.map(String.init) ?? "?")프렛"
     }
     func nudgeSelectedTime(by delta: Double) {
+        guard canEdit else { return }
         guard let selected, delta.isFinite else { return }
         let time = min(max(0, selected.time + delta), project.duration - 0.001)
         guard time != selected.time else { return }
@@ -371,6 +432,7 @@ final class Workspace: ObservableObject {
         status = "위치 \(clockLabel(time)) · Shift+화살표로 정밀 이동"
     }
     func selectAdjacentEvent(backwards: Bool = false) {
+        guard canEdit else { return }
         let events = project.events.filter { $0.lane == lane }.sorted {
             $0.time == $1.time ? $0.string < $1.string : $0.time < $1.time
         }
@@ -384,8 +446,8 @@ final class Workspace: ObservableObject {
     }
     func markUnknown() { updateSelected { $0.fret = nil } }
     func toggleTentative() { updateSelected { $0.tentative.toggle() } }
-    func finishEntry() { fretEntry.reset(); newlyCreatedID = nil }
-    func clearSelection() { cancelPositionDrag(); finishEntry(); selectedID = nil; requestKeyboardFocus?() }
+    func finishEntry() { guard canEdit else { return }; fretEntry.reset(); newlyCreatedID = nil }
+    func clearSelection() { guard canEdit else { return }; cancelPositionDrag(); finishEntry(); selectedID = nil; requestKeyboardFocus?() }
 
     private func recordUndo() {
         undoHistory.append(EditSnapshot(events: project.events, selectedID: selectedID, activeString: activeString))
@@ -393,12 +455,14 @@ final class Workspace: ObservableObject {
         redoHistory.removeAll()
     }
     func undoEdit() {
+        guard canEdit else { return }
         if positionDrag != nil { cancelPositionDrag(); return }
         guard let snapshot = undoHistory.popLast() else { return }
         redoHistory.append(EditSnapshot(events: project.events, selectedID: selectedID, activeString: activeString))
         restore(snapshot); status = "입력 취소 · ⇧⌘Z로 다시 실행"
     }
     func redoEdit() {
+        guard canEdit else { return }
         guard let snapshot = redoHistory.popLast() else { return }
         undoHistory.append(EditSnapshot(events: project.events, selectedID: selectedID, activeString: activeString))
         restore(snapshot); status = "입력 다시 실행"
@@ -416,96 +480,219 @@ final class Workspace: ObservableObject {
     }
     private func scheduleAutosave() {
         autosaveTask?.cancel()
-        guard projectURL != nil else { return }
+        guard !closed, projectURL != nil else { return }
         autosaveTask = Task { [weak self] in
             do { try await Task.sleep(for: .milliseconds(800)) } catch { return }
-            guard let self, !Task.isCancelled, !self.busy, self.dirty, let url = self.projectURL else { return }
+            guard let self, !Task.isCancelled, self.canEdit, self.dirty, let url = self.projectURL else { return }
             do { try self.persist(to: url) }
             catch { self.error = error.localizedDescription }
         }
     }
 
-    func analyze() {
-        guard let prepared, !analyzing else { return }
-        let target = source
+    @discardableResult
+    func analyze() -> Task<Void, Never>? {
+        guard canEdit, let prepared, !analyzing else { return nil }
+        let target = source, identity = projectIdentity, duration = project.duration
+        let id = UUID()
+        analysisID = id
         analyzing = true; status = "\(target.title) 분석 중…"
         analysisTask = Task {
-            defer { analyzing = false; analysisTask = nil }
+            defer {
+                if analysisID == id { analyzing = false; analysisTask = nil; analysisID = nil }
+            }
             do {
-                let summary = try await AppleMusicAnalysis.analyze(prepared.url(for: target), duration: project.duration)
+                let summary = try await services.analyze(prepared.url(for: target), duration)
                 try Task.checkCancellation()
+                guard !closed, analysisID == id, projectIdentity == identity,
+                      self.prepared?.directory == prepared.directory else { return }
                 project.analyses[target.rawValue] = summary; changed()
                 status = "\(target.title) 분석 완료 · TAB은 직접 입력"
-            } catch is CancellationError {
-                status = "분석 취소됨"
             } catch {
-                if Task.isCancelled { status = "분석 취소됨" }
+                guard !closed, analysisID == id else { return }
+                if error is CancellationError || Task.isCancelled { status = "분석 취소됨" }
                 else { self.error = error.localizedDescription; status = "분석 실패 · 편집은 계속할 수 있습니다" }
             }
         }
+        return analysisTask
     }
-    func cancelAnalysis() { analysisTask?.cancel() }
+    func cancelAnalysis() {
+        analysisTask?.cancel(); analysisTask = nil; analysisID = nil; analyzing = false
+        if !closed { status = "분석 취소됨" }
+    }
 
     func importAudio(relink: Bool = false) {
-        guard !busy, !analyzing, relink || confirmDiscard() else { return }
+        guard canLoad, relink || confirmDiscard(), let operation = reserveLoad() else { return }
         let panel = NSOpenPanel()
         panel.allowedContentTypes = [.audio]; panel.canChooseDirectories = false
         panel.message = relink ? "현재 TAB에 연결할 오디오를 선택하세요." : "채보할 원곡 또는 이미 분리한 기타 스템을 선택하세요."
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-        Task { await loadAudio(url, preserving: relink ? project : nil) }
+        guard panel.runModal() == .OK, let url = panel.url else {
+            if loadOperation?.id == operation.id { cancelLoading() }
+            return
+        }
+        launchLoad(.audio(url, relink), operation: operation)
+    }
+
+    /// URL entry points share reservation/authorization with the panel and startup paths.
+    @discardableResult
+    func loadAudio(at url: URL, relink: Bool = false) -> Task<Bool, Never>? {
+        guard canLoad, relink || confirmDiscard(), let operation = reserveLoad() else { return nil }
+        return launchLoad(.audio(url, relink), operation: operation)
     }
 
     @discardableResult
-    private func loadAudio(_ url: URL, preserving: ScoreProject? = nil, demo: Bool = false) async -> Bool {
-        autosaveTask?.cancel()
-        busy = true; status = "오디오와 L/R 파형 준비 중…"
-        defer { busy = false }
-        let scoped = url.startAccessingSecurityScopedResource()
-        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
-        do {
-            let audio = try await AudioPreparation.prepare(url)
-            if let preserving, preserving.events.contains(where: { $0.time >= audio.duration }) {
-                try? FileManager.default.removeItem(at: audio.directory)
-                throw ProjectError.invalidData
-            }
-            stopAndCleanAudio()
-            prepared = audio
-            if var existing = preserving {
-                if abs(existing.duration - audio.duration) > 0.05 { existing.analyses = [:] }
-                existing.duration = audio.duration; existing.audioPath = url.path; project = existing
-            } else {
-                project = ScoreProject(title: url.deletingPathExtension().lastPathComponent,
-                                       audioPath: url.path, duration: audio.duration)
-                projectURL = nil
-            }
-            isDemo = demo; selectedID = nil; cursor = 0; windowStart = 0
-            positionDrag = nil; positionMagnetTargetID = nil; magnetDragInput = nil
-            undoHistory.removeAll(); redoHistory.removeAll(); fretEntry.reset(); newlyCreatedID = nil
-            inspectorVisible = false
-            scorePage = 0; followScore = true
-            loopStart = 0; loopEnd = min(audio.duration, 4); looping = false; source = .stereo
-            configurePlayer(); dirty = preserving != nil && !demo
-            savedProject = project
-            status = audio.isMono ? "모노 파일 · L/R에는 같은 소리가 들어 있습니다" : "스테레오 준비 완료 · 채널별로 듣고 필요한 음을 남기세요"
-            return true
-        } catch { self.error = error.localizedDescription; status = "오디오를 열지 못했습니다"; return false }
+    func loadDemo(long: Bool = false) -> Task<Bool, Never>? {
+        guard canLoad, confirmDiscard(), let operation = reserveLoad() else { return nil }
+        return launchLoad(.demo(long), operation: operation)
     }
 
-    func loadDemo(long: Bool = false) async {
-        guard !busy, !analyzing, confirmDiscard() else { return }
+    private func reserveLoad() -> LoadOperation? {
+        guard !closed, !analyzing, loadOperation == nil, !busy || startupPending else { return nil }
+        cancelPositionDrag()
+        let operation = LoadOperation(projectID: projectIdentity, snapshot: project)
+        startupPending = false
+        loadOperation = operation
+        autosaveTask?.cancel()
+        busy = true; loadProgress = 0; status = "오디오와 L/R 파형 준비 중…"
+        return operation
+    }
+
+    @discardableResult
+    private func launchLoad(_ request: LoadRequest, operation: LoadOperation) -> Task<Bool, Never>? {
+        guard !closed, loadOperation?.id == operation.id else { return nil }
+        let task = Task { await performLoad(request, operation: operation) }
+        loadTask = task
+        return task
+    }
+
+    /// A cancelled service may still finish. Its token cannot commit, publish or clear a newer busy state.
+    func cancelLoading() {
+        guard loadOperation != nil else { return }
+        loadTask?.cancel(); loadTask = nil; loadOperation = nil
+        busy = false; loadProgress = 0
+        if !closed { status = "오디오 준비 취소됨 · 이전 작업 유지"; scheduleAutosave() }
+    }
+
+    private func requireCurrent(_ operation: LoadOperation) throws {
+        try Task.checkCancellation()
+        guard !closed, loadOperation?.id == operation.id,
+              projectIdentity == operation.projectID, project == operation.snapshot else { throw CancellationError() }
+    }
+
+    private func publishProgress(_ value: Double, operation: LoadOperation) {
+        guard !closed, loadOperation?.id == operation.id, value.isFinite else { return }
+        loadProgress = max(loadProgress, min(1, max(0, value)))
+    }
+
+    private func stageAudio(_ url: URL, preserving: ScoreProject?, operation: LoadOperation) async throws -> StagedWorkspace {
+        let scoped = url.startAccessingSecurityScopedResource()
+        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+        let audio = try await services.prepare(url) { [weak self] progress in
+            await self?.publishProgress(progress, operation: operation)
+        }
+        var retained = false
+        defer { if !retained { try? FileManager.default.removeItem(at: audio.directory) } }
+        try requireCurrent(operation)
+        if let preserving, preserving.events.contains(where: { $0.time >= audio.duration }) { throw ProjectError.invalidData }
+        var candidate = preserving ?? ScoreProject(title: url.deletingPathExtension().lastPathComponent, audioPath: url.path, duration: audio.duration)
+        if abs(candidate.duration - audio.duration) > 0.05 { candidate.analyses = [:] }
+        candidate.duration = audio.duration; candidate.audioPath = url.path
+        retained = true
+        return StagedWorkspace(project: candidate, audio: audio,
+            projectURL: preserving == nil ? nil : projectURL, dirty: preserving != nil,
+            status: audio.isMono ? "모노 파일 · L/R에는 같은 소리가 들어 있습니다" : "스테레오 준비 완료 · 채널별로 듣고 필요한 음을 남기세요")
+    }
+
+    private func stageProject(_ url: URL, operation: LoadOperation) async throws -> StagedWorkspace {
+        let loaded = try await services.readProject(url).validated()
+        try requireCurrent(operation)
+        var staged: StagedWorkspace
+        if let path = loaded.audioPath, services.fileExists(URL(fileURLWithPath: path)) {
+            staged = try await stageAudio(URL(fileURLWithPath: path), preserving: loaded, operation: operation)
+        } else {
+            staged = StagedWorkspace(project: loaded, status: "오디오 경로를 찾을 수 없습니다 · 오디오 다시 연결을 사용하세요")
+        }
+        staged.projectURL = url; staged.fromDisk = true
+        return staged
+    }
+
+    private func stageDemo(_ long: Bool, operation: LoadOperation) async throws -> StagedWorkspace {
+        let demoProject = long ? ScoreProject.longDemo : .demo
+        let url = try await services.createDemo(demoProject)
+        var retained = false
+        defer { if !retained { try? FileManager.default.removeItem(at: url) } }
+        try requireCurrent(operation)
+        var staged = try await stageAudio(url, preserving: demoProject, operation: operation)
+        staged.projectURL = nil; staged.demoURL = url; staged.isDemo = true
+        staged.status = "합성 오디오 + 수동 TAB 예시 · 자동 채보 결과가 아닙니다"
+        retained = true
+        return staged
+    }
+
+    private func performLoad(_ request: LoadRequest, operation: LoadOperation) async -> Bool {
+        var staged: StagedWorkspace?
+        var committed = false
+        defer {
+            if !committed {
+                if let audio = staged?.audio { try? FileManager.default.removeItem(at: audio.directory) }
+                if let url = staged?.demoURL { try? FileManager.default.removeItem(at: url) }
+            }
+            if loadOperation?.id == operation.id {
+                loadTask = nil; loadOperation = nil; busy = false
+                if !closed { scheduleAutosave() }
+            }
+        }
         do {
-            let demoProject = long ? ScoreProject.longDemo : .demo
-            let url = try AudioPreparation.createDemo(project: demoProject)
-            if let demoURL { try? FileManager.default.removeItem(at: demoURL) }
-            demoURL = url
-            guard await loadAudio(url, preserving: demoProject, demo: true) else { return }
-            cursor = 2; loopStart = 2; loopEnd = 6
-            status = "합성 오디오 + 수동 TAB 예시 · 자동 채보 결과가 아닙니다"
-        } catch { self.error = error.localizedDescription }
+            try requireCurrent(operation)
+            switch request {
+            case .startup:
+                if let url = services.lastProject(), services.fileExists(url) {
+                    do { staged = try await stageProject(url, operation: operation) }
+                    catch {
+                        try requireCurrent(operation)
+                        staged = try await stageDemo(false, operation: operation)
+                    }
+                } else { staged = try await stageDemo(false, operation: operation) }
+            case .demo(let long): staged = try await stageDemo(long, operation: operation)
+            case .audio(let url, let relink):
+                staged = try await stageAudio(url, preserving: relink ? operation.snapshot : nil, operation: operation)
+            case .project(let url): staged = try await stageProject(url, operation: operation)
+            }
+            try requireCurrent(operation)
+            guard let staged else { return false }
+            activate(staged)
+            committed = true; loadProgress = 1
+            return true
+        } catch {
+            guard !closed, loadOperation?.id == operation.id else { return false }
+            if error is CancellationError || Task.isCancelled { status = "오디오 준비 취소됨 · 이전 작업 유지" }
+            else { self.error = error.localizedDescription; status = "오디오를 열지 못했습니다 · 이전 작업 유지" }
+            return false
+        }
+    }
+
+    private func activate(_ staged: StagedWorkspace) {
+        stopAndCleanAudio()
+        let previousDemo = demoURL
+        if let previousDemo, previousDemo != staged.audio?.original {
+            try? FileManager.default.removeItem(at: previousDemo)
+        }
+        demoURL = staged.demoURL ?? (previousDemo == staged.audio?.original ? previousDemo : nil)
+        prepared = staged.audio; project = staged.project
+        projectIdentity = UUID(); projectURL = staged.projectURL; isDemo = staged.isDemo
+        selectedID = nil; cursor = staged.isDemo ? 2 : 0; windowStart = 0
+        positionDrag = nil; positionMagnetTargetID = nil; magnetDragInput = nil
+        undoHistory.removeAll(); redoHistory.removeAll(); fretEntry.reset(); newlyCreatedID = nil
+        inspectorVisible = false; scorePage = 0; followScore = true
+        loopStart = staged.isDemo ? 2 : 0; loopEnd = staged.isDemo ? 6 : min(project.duration, 4)
+        looping = false; source = .stereo
+        configurePlayer(); dirty = !staged.fromDisk && !staged.isDemo && staged.dirty
+        savedProject = project
+        if staged.fromDisk, let url = projectURL { services.rememberProject(url) }
+        status = staged.status; requestKeyboardFocus?()
     }
 
     func save() {
-        guard !busy else { return }
+        guard canEdit else { return }
         var destination = projectURL
         if destination == nil {
             let panel = NSSavePanel()
@@ -531,40 +718,28 @@ final class Workspace: ObservableObject {
         let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         try encoder.encode(saved).write(to: destination, options: .atomic)
         project = saved; savedProject = saved; projectURL = destination; dirty = false
-        UserDefaults.standard.set(destination.path, forKey: "lastProjectPath")
+        services.rememberProject(destination)
     }
 
     func openProject() {
-        guard !busy, !analyzing, confirmDiscard() else { return }
+        guard canLoad, confirmDiscard(), let operation = reserveLoad() else { return }
         let panel = NSOpenPanel()
         panel.allowedContentTypes = [UTType(filenameExtension: "roughscore") ?? .json]
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-        Task { await loadProject(at: url) }
+        guard panel.runModal() == .OK, let url = panel.url else {
+            if loadOperation?.id == operation.id { cancelLoading() }
+            return
+        }
+        launchLoad(.project(url), operation: operation)
     }
 
     @discardableResult
-    private func loadProject(at url: URL) async -> Bool {
-        do {
-            let loaded = try JSONDecoder().decode(ScoreProject.self, from: Data(contentsOf: url)).validated()
-                if let path = loaded.audioPath, FileManager.default.fileExists(atPath: path) {
-                    guard await loadAudio(URL(fileURLWithPath: path), preserving: loaded) else { return false }
-                } else {
-                    autosaveTask?.cancel()
-                    stopAndCleanAudio(); project = loaded; cursor = 0; windowStart = 0
-                    selectedID = nil; loopStart = 0; loopEnd = min(loaded.duration, 4)
-                    looping = false; inspectorVisible = false
-                    undoHistory.removeAll(); redoHistory.removeAll(); fretEntry.reset(); newlyCreatedID = nil
-                    scorePage = 0; followScore = true
-                    status = "오디오 경로를 찾을 수 없습니다 · 오디오 다시 연결을 사용하세요"
-                }
-                projectURL = url; savedProject = project; isDemo = false; dirty = false
-                UserDefaults.standard.set(url.path, forKey: "lastProjectPath")
-                requestKeyboardFocus?()
-                return true
-        } catch { self.error = error.localizedDescription; return false }
+    func loadProject(at url: URL) -> Task<Bool, Never>? {
+        guard canLoad, confirmDiscard(), let operation = reserveLoad() else { return nil }
+        return launchLoad(.project(url), operation: operation)
     }
 
     func exportText() {
+        guard canEdit else { return }
         let panel = NSSavePanel(); panel.nameFieldStringValue = project.title + "-TAB.txt"
         panel.allowedContentTypes = [.plainText]
         guard panel.runModal() == .OK, let url = panel.url else { return }
@@ -600,6 +775,10 @@ final class Workspace: ObservableObject {
         prepared = nil
     }
     func shutdown() {
+        guard !closed else { return }
+        closed = true; startupPending = false
+        cancelLoading(); cancelAnalysis()
+        busy = false
         autosaveTask?.cancel()
         analysisTask?.cancel(); timer?.invalidate(); stopAndCleanAudio()
         if let demoURL { try? FileManager.default.removeItem(at: demoURL) }
