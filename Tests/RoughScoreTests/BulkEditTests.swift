@@ -19,6 +19,19 @@ struct BulkEditTests {
             TabEvent(id: Self.unrelated, time: 8, lane: .right, string: 1, fret: 24, length: .quarter, memo: "untouched")
         ], analyses: ["left": AnalysisSummary(bpm: 113, key: "C", beats: [1, 2.25], bars: [0, 7], sections: [TimeSpan(start: 1, end: 5)])])
         project.tuning = ["D", "A", "F", "C", "G", "D"]
+        // Authored metadata fixtures only; no source audio or inference is loaded.
+        let identity = AudioContentIdentity(sha256: String(repeating: "a", count: 64),
+                                            channelCount: 2, sampleRate: 48_000, frameCount: 576_000)
+        let original = AudioAsset(id: UUID(uuidString: "00000000-0000-0000-0000-000000000061")!,
+                                  reference: AudioReference(path: "/fixture/generated.wav"), identity: identity)
+        let stem = AudioAsset(id: UUID(uuidString: "00000000-0000-0000-0000-000000000062")!,
+                              role: .importedGuitarStem,
+                              reference: AudioReference(kind: .contained, path: "audio/authored-metadata-only.wav"),
+                              originalTimeOffset: -0.25)
+        project.assets = [original, stem]
+        project.tuningDefinition = TuningDefinition(openMIDIPitches: [62, 57, 53, 48, 43, 38], capo: 2)
+        project.analyses["left"]?.provenance = AnalysisProvenance(assetID: original.id, identity: identity,
+            channel: "left", analyzerVersion: "authored-unit-metadata-v1", settings: "no-inference")
         return project
     }
 

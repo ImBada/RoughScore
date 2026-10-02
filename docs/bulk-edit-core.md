@@ -104,8 +104,10 @@ neither hard-code a new document version nor migrate it; v1 legacy documents and
 current-version documents use the existing decoder/validator's compatibility
 rules. Tests cover an independently authored v1 JSON record and a current-schema
 round trip. Unrecognized project versions and duplicate UUIDs fail the existing
-validator before any edit. The baseline at implementation is project schema v1;
-this prerequisite does not modify Project.swift or introduce a file schema.
+validator before any edit. The accepted baseline is project schema v1 with optional asset, tuningDefinition
+and analysis-provenance extensions from PR27. Tests use nondefault authored values
+for these fields as well as a legacy v1 record without them; this prerequisite
+does not modify Project.swift or introduce a file schema.
 
 Paste validates every target time before generating IDs. The injectable UUID
 factory defaults to `UUID()`; any collision with an existing ID or another new ID
@@ -132,8 +134,8 @@ are required before root merges. Later UI/history acceptance remains with #8,
 including one-undo application, collision display/gesture integration, cursor
 paste/duplicate commands and system pasteboard ownership.
 
-Local validation on accepted main8a53e3e3a81962fd854a76f6e164de7816a36ea5:
-123 Swift tests in13 suites, including16 BulkEditTests, passed; release build
+Local validation on accepted maind6775e6cf4920a54dd23d91c0436e0bdcfaeb4b6:
+136 Swift tests in15 suites, including16 BulkEditTests, passed; release build
 passed;33 evaluator and7 CI-helper Python tests passed. Exact memo UTF-8 bytes
 (including decomposed Unicode) and no-op negative-zero timestamp bits are checked.
 This is core/schema verification only; GUI and actual one-undo behavior remain
