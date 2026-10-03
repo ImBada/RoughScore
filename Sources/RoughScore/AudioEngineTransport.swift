@@ -103,7 +103,7 @@ final class AudioEngineGraph {
             let count = AVAudioFrameCount(file.length - frame)
             if source == .stereo {
                 node.scheduleSegment(file, startingFrame: frame, frameCount: count, at: nil,
-                                     completionCallbackType: .dataPlayedBack, completionHandler: { [weak self] _ in
+                                     completionCallbackType: .dataPlayedBack, completionHandler: { @Sendable [weak self] _ in
                     Task { @MainActor [weak self] in
                         guard let self, self.generation == token else { return }
                         self.parked = self.duration; self.running = false; self.epoch = nil
