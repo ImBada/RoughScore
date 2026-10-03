@@ -115,6 +115,7 @@ final class Workspace: ObservableObject {
 
     var canEdit: Bool { !busy && !closed }
     var canLoad: Bool { canEdit && !analyzing }
+    var canMutateNotes: Bool { canEdit && positionDrag == nil }
 
 
     var windowEnd: Double { min(project.duration, windowStart + windowLength) }
@@ -169,7 +170,8 @@ final class Workspace: ObservableObject {
     }
 
     func seek(_ time: Double) {
-        cursor = min(max(0, time), max(0, project.duration - 0.001))
+        guard let bounded = TimeBounds.clamp(time, duration: project.duration) else { return }
+        cursor = bounded
         if looping && (cursor < loopStart || cursor >= loopEnd) { looping = false }
         player?.currentTime = cursor
         if cursor < windowStart || cursor >= windowEnd {
@@ -179,14 +181,14 @@ final class Workspace: ObservableObject {
     }
 
     func seekForEditing(_ time: Double, lane: GuitarLane? = nil) {
-        guard canEdit else { return }
+        guard canMutateNotes, let bounded = TimeBounds.clamp(time, duration: project.duration) else { return }
         fretEntry.reset(); newlyCreatedID = nil; selectedID = nil
         if let lane { selectLane(lane) }
-        jumpToScoreTime(time); requestKeyboardFocus?()
+        jumpToScoreTime(bounded); requestKeyboardFocus?()
         status = "\(clockLabel(cursor)) · \(activeString)번 줄에 숫자로 입력 · 파형 드래그로 반복"
     }
     func selectLane(_ value: GuitarLane) {
-        guard canEdit else { return }
+        guard canMutateNotes else { return }
         lane = value
         if source != .stereo { switchSource(value == .left ? .left : .right) }
     }
@@ -222,7 +224,7 @@ final class Workspace: ObservableObject {
     }
 
     func switchSource(_ value: ListeningSource) {
-        guard canEdit else { return }
+        guard canMutateNotes else { return }
         let previousLayout = scoreLayout
         let resume = playing
         player?.pause(); playing = false; source = value
@@ -271,10 +273,11 @@ final class Workspace: ObservableObject {
     }
 
     func addEvent(time: Double, string: Int) {
-        guard canEdit else { return }
-        activeString = string
+        guard canMutateNotes else { return }
+        guard time.isFinite, (1...6).contains(string) else { return }
         let snapped = TabMath.snap(time, beats: scoreSummary?.beats ?? [], enabled: snapToBeat)
-        let actual = min(max(0, snapped), project.duration - 0.001)
+        guard let actual = TimeBounds.clamp(snapped, duration: project.duration) else { return }
+        activeString = string
         if let existing = project.events.first(where: { $0.lane == lane && $0.string == string && abs($0.time - actual) < 0.04 }) {
             select(existing); return
         }
@@ -287,16 +290,15 @@ final class Workspace: ObservableObject {
     }
 
     func select(_ event: TabEvent) {
-        guard canEdit else { return }
+        guard canMutateNotes, let actual = project.events.first(where: { $0.id == event.id }) else { return }
         fretEntry.reset(); newlyCreatedID = nil
-        selectedID = event.id; activeString = event.string; selectLane(event.lane); jumpToScoreTime(event.time)
+        selectedID = actual.id; activeString = actual.string; selectLane(actual.lane); jumpToScoreTime(actual.time)
         requestKeyboardFocus?()
         status = "숫자로 프렛 변경 · ↑↓ 줄 이동 · ←→ 위치 이동 · Tab 다음 음"
     }
 
     func inputDigit(_ digit: Int, at time: Double = ProcessInfo.processInfo.systemUptime) {
-        guard canEdit else { return }
-        guard positionDrag == nil else { return }
+        guard canMutateNotes else { return }
         guard (0...9).contains(digit), time.isFinite else { return }
         if selectedID == nil { addEvent(time: cursor, string: activeString) }
         guard let selectedID, let index = project.events.firstIndex(where: { $0.id == selectedID }) else { return }
@@ -311,17 +313,27 @@ final class Workspace: ObservableObject {
     }
 
     func updateSelected(_ change: (inout TabEvent) -> Void) {
-        guard canEdit else { return }
+        guard canMutateNotes else { return }
         guard let index = project.events.firstIndex(where: { $0.id == selectedID }) else { return }
+        let original = project.events[index]
+        var updated = original
+        change(&updated)
+        guard updated.id == original.id,
+              let time = TimeBounds.clamp(updated.time, duration: project.duration) else { return }
+        updated.time = time
+        guard updated != original else { return }
+        var candidate = project
+        candidate.events[index] = updated
+        guard (try? candidate.validated()) != nil else { return }
         recordUndo(); fretEntry.reset(); newlyCreatedID = nil
-        change(&project.events[index]); changed()
+        project = candidate; activeString = updated.string; changed()
     }
 
     func renderedEvent(_ event: TabEvent) -> TabEvent {
         positionDrag?.id == event.id ? positionDrag! : event
     }
     func beginPositionDrag(_ event: TabEvent) {
-        guard canEdit else { return }
+        guard canMutateNotes else { return }
         guard !busy, let actual = project.events.first(where: { $0.id == event.id }) else { return }
         fretEntry.reset(); newlyCreatedID = nil
         selectedID = actual.id; lane = actual.lane; activeString = actual.string
@@ -334,7 +346,8 @@ final class Workspace: ObservableObject {
         guard time.isFinite, var preview = positionDrag else { return }
         positionMagnetTargetID = nil; magnetDragInput = nil
         let snapped = TabMath.snap(time, beats: scoreSummary?.beats ?? [], enabled: snap && snapToBeat)
-        preview.time = min(max(0, snapped), project.duration - 0.001)
+        guard let bounded = TimeBounds.clamp(snapped, duration: project.duration) else { return }
+        preview.time = bounded
         preview.string = min(6, max(1, string))
         positionDrag = preview
         status = "\(String(format: "%.3f", preview.time))초 · \(preview.string)번 줄 · 놓으면 이동 / Esc 취소"
@@ -374,9 +387,12 @@ final class Workspace: ObservableObject {
             status = "\(String(format: "%.3f", preview.time))초 · 숫자를 끌어서 위치 이동"
             return
         }
+        var candidate = project
+        candidate.events[index].time = preview.time
+        candidate.events[index].string = preview.string
+        guard (try? candidate.validated()) != nil else { return }
         recordUndo()
-        project.events[index].time = preview.time
-        project.events[index].string = preview.string
+        project = candidate
         activeString = preview.string
         changed(); requestKeyboardFocus?()
         status = "\(String(format: "%.3f", preview.time))초로 이동 · ⌘Z 취소 · Shift+Space로 듣기"
@@ -384,10 +400,11 @@ final class Workspace: ObservableObject {
     func cancelPositionDrag() {
         guard canEdit else { return }
         positionDrag = nil; positionMagnetTargetID = nil; magnetDragInput = nil
+        status = "이동 취소 · 선택 유지 · Esc를 다시 누르면 선택 해제"
         requestKeyboardFocus?()
     }
     func moveSelectedPosition(to time: Double, string: Int? = nil) {
-        guard let selected, time.isFinite else { return }
+        guard canMutateNotes, let selected, time.isFinite else { return }
         beginPositionDrag(selected)
         previewPositionDrag(time: time, string: string ?? selected.string, snap: false)
         commitPositionDrag()
@@ -400,7 +417,7 @@ final class Workspace: ObservableObject {
         }
     }
     func focusSelectedForPosition() {
-        guard let selected else { return }
+        guard canMutateNotes, let selected else { return }
         windowLength = min(project.duration, 2)
         windowStart = min(max(0, selected.time - windowLength / 2), max(0, project.duration - windowLength))
         scoreView = false; requestKeyboardFocus?()
@@ -418,8 +435,7 @@ final class Workspace: ObservableObject {
         if !playing { togglePlayback() }
     }
     func deleteSelected() {
-        guard canEdit else { return }
-        cancelPositionDrag()
+        guard canMutateNotes else { return }
         guard selected != nil else { return }
         recordUndo()
         project.events.removeAll { $0.id == selectedID }; selectedID = nil
@@ -428,7 +444,7 @@ final class Workspace: ObservableObject {
     }
 
     func moveSelectedString(by delta: Int) {
-        guard canEdit else { return }
+        guard canMutateNotes else { return }
         guard let selected else {
             activeString = min(6, max(1, activeString + delta))
             status = "편집 줄 \(activeString)번 · 숫자를 입력하면 현재 위치에 기록"
@@ -441,15 +457,15 @@ final class Workspace: ObservableObject {
         status = "\(string)번 줄 · \(selected.fret.map(String.init) ?? "?")프렛"
     }
     func nudgeSelectedTime(by delta: Double) {
-        guard canEdit else { return }
+        guard canMutateNotes else { return }
         guard let selected, delta.isFinite else { return }
-        let time = min(max(0, selected.time + delta), project.duration - 0.001)
+        guard let time = TimeBounds.clamp(selected.time + delta, duration: project.duration) else { return }
         guard time != selected.time else { return }
         moveSelectedPosition(to: time); revealSelectedPosition()
         status = "위치 \(clockLabel(time)) · Shift+화살표로 정밀 이동"
     }
     func selectAdjacentEvent(backwards: Bool = false) {
-        guard canEdit else { return }
+        guard canMutateNotes else { return }
         let events = project.events.filter { $0.lane == lane }.sorted {
             $0.time == $1.time ? $0.string < $1.string : $0.time < $1.time
         }
@@ -463,8 +479,23 @@ final class Workspace: ObservableObject {
     }
     func markUnknown() { updateSelected { $0.fret = nil } }
     func toggleTentative() { updateSelected { $0.tentative.toggle() } }
-    func finishEntry() { guard canEdit else { return }; fretEntry.reset(); newlyCreatedID = nil }
-    func clearSelection() { guard canEdit else { return }; cancelPositionDrag(); finishEntry(); selectedID = nil; requestKeyboardFocus?() }
+    func finishEntry() { guard canMutateNotes else { return }; fretEntry.reset(); newlyCreatedID = nil }
+    func clearSelection() {
+        guard canEdit else { return }
+        if positionDrag != nil { cancelPositionDrag(); return }
+        finishEntry(); selectedID = nil; requestKeyboardFocus?()
+        status = "선택 해제 · 현재 위치에서 숫자로 입력"
+    }
+
+    /// The field's rounded display is not an edit. Stale controls cannot apply text to another UUID.
+    @discardableResult
+    func applyPositionTimeInput(_ text: String, displayed: String, eventID: UUID) -> Bool {
+        guard canMutateNotes, let selected, selected.id == eventID, text != displayed,
+              let parsed = Double(text.replacingOccurrences(of: ",", with: ".")),
+              let time = TimeBounds.clamp(parsed, duration: project.duration), time != selected.time else { return false }
+        moveSelectedPosition(to: time); revealSelectedPosition()
+        return true
+    }
 
     private func recordUndo() {
         undoHistory.append(EditSnapshot(events: project.events, selectedID: selectedID, activeString: activeString))
@@ -479,7 +510,7 @@ final class Workspace: ObservableObject {
         restore(snapshot); status = "입력 취소 · ⇧⌘Z로 다시 실행"
     }
     func redoEdit() {
-        guard canEdit else { return }
+        guard canMutateNotes else { return }
         guard let snapshot = redoHistory.popLast() else { return }
         undoHistory.append(EditSnapshot(events: project.events, selectedID: selectedID, activeString: activeString))
         restore(snapshot); status = "입력 다시 실행"

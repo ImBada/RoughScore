@@ -64,7 +64,7 @@ struct WorkspaceView: View {
                 } }
                 if workspace.inspectorVisible {
                     Divider().overlay(Palette.border)
-                    NoteInspector(workspace: workspace).frame(width: 250)
+                    NoteInspector(workspace: workspace).frame(width: 250).disabled(!workspace.canMutateNotes)
                 }
             }
             .disabled(!workspace.canEdit)
@@ -237,7 +237,7 @@ struct WorkspaceView: View {
                 .help("새 음 입력에 적용 · 이동은 자유 드래그, Shift로 가까운 음에 정렬")
                 .disabled(workspace.scoreSummary?.beats.isEmpty ?? true)
             Button { workspace.undoEdit() } label: { Image(systemName: "arrow.uturn.backward") }.disabled(!workspace.canUndo).help("실행 취소 · ⌘Z")
-            Button { workspace.redoEdit() } label: { Image(systemName: "arrow.uturn.forward") }.disabled(!workspace.canRedo).help("다시 실행 · ⇧⌘Z")
+            Button { workspace.redoEdit() } label: { Image(systemName: "arrow.uturn.forward") }.disabled(!workspace.canRedo || workspace.positionDrag != nil).help("다시 실행 · ⇧⌘Z")
             Button { workspace.deleteSelected() } label: { Image(systemName: "trash") }.disabled(workspace.selected == nil).help("선택한 음 삭제 · Delete")
             Toggle("상세", isOn: $workspace.inspectorVisible).toggleStyle(.button).help("상세 편집 · I")
             Text(workspace.saveState.title).font(.system(size: 9)).foregroundStyle(Palette.secondary)
@@ -324,7 +324,7 @@ struct WaveformView: View {
     var body: some View {
         GeometryReader { geometry in
             Canvas { context, size in
-                let span = max(0.001, workspace.windowEnd - workspace.windowStart)
+                let span = (TimeBounds.span(start: workspace.windowStart, end: workspace.windowEnd) ?? 1)
                 let start = workspace.windowStart
                 func x(_ t: Double) -> Double { 38 + (t - start) / span * (size.width - 58) }
                 if workspace.looping || dragRange != nil {
@@ -391,7 +391,7 @@ struct TabCanvas: View {
     @ObservedObject var workspace: Workspace
     var body: some View {
         GeometryReader { geometry in
-            let span = max(0.001, workspace.windowEnd - workspace.windowStart)
+            let span = (TimeBounds.span(start: workspace.windowStart, end: workspace.windowEnd) ?? 1)
             let width = geometry.size.width - 78
             ZStack(alignment: .topLeading) {
                 Canvas { context, size in
@@ -453,7 +453,7 @@ struct TabCanvas: View {
                                          return CGPoint(x: CGFloat(timeX), y: CGFloat(68 + (note.string - 1) * 32))
                                      },
                                      destination: { note, translation in
-                                         (min(workspace.windowEnd - 0.001, max(workspace.windowStart, note.time + translation.width / width * span)),
+                                         (TimeBounds.timelineDragTime(note.time, start: workspace.windowStart, end: workspace.windowEnd, translation: translation.width, width: width) ?? note.time,
                                           note.string + Int(round(translation.height / 32)))
                                      }, magnetTargets: workspace.visibleEvents, displayScale: 1,
                                      compact: false, background: Palette.panel, ink: Palette.background, tentative: Palette.purple)
@@ -489,8 +489,7 @@ struct NoteInspector: View {
                 Divider()
                 VStack(alignment: .leading, spacing: 8) {
                     fieldLabel("위치 · 초")
-                    TextField("위치", value: binding(\.time, transform: { min(max(0, $0.isFinite ? $0 : 0), workspace.project.duration - 0.001) }), format: .number.precision(.fractionLength(3)))
-                        .textFieldStyle(.roundedBorder)
+                    PositionTimeField(workspace: workspace, event: event)
                     fieldLabel("기타 줄")
                     Picker("줄", selection: binding(\.string)) {
                         ForEach(1...6, id: \.self) { Text("\($0)번 · \(workspace.project.tuning[$0 - 1])").tag($0) }

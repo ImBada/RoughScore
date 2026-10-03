@@ -332,7 +332,7 @@ private struct ScoreStaff: View {
                                      position: { note in CGPoint(x: left + row.fraction(at: note.time) * width,
                                                                   y: stringTop + Double((note.string - 1) * 14)) },
                                      destination: { note, translation in
-                                         (min(row.end - 0.001, row.time(at: row.fraction(at: note.time) + translation.width / width)),
+                                         (TimeBounds.scoreDragTime(note.time, system: row, translation: translation.width, width: width) ?? note.time,
                                           note.string + Int(round(translation.height / 14)))
                                      }, magnetTargets: events, displayScale: displayScale,
                                      compact: true, background: Paper.background, ink: Paper.ink, tentative: Paper.muted)
