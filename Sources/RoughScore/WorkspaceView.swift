@@ -178,8 +178,9 @@ struct WorkspaceView: View {
             VStack(alignment: .leading, spacing: 8) {
                 overline("A WORKING TRANSCRIPTION")
                 Text(workspace.project.title).font(.system(size: 28, weight: .medium)).tracking(-0.8).lineLimit(1)
-                Text(workspace.isDemo ? "합성 스테레오 예시 · 왼쪽 리프 / 오른쪽 멜로디" : "\(clockLabel(workspace.project.duration)) · 로컬 오디오 · Standard tuning")
+                Text(workspace.isDemo ? "합성 스테레오 예시 · 왼쪽 리프 / 오른쪽 멜로디" : "\(clockLabel(workspace.project.duration)) · 로컬 오디오")
                     .font(.system(size: 11)).foregroundStyle(Palette.secondary)
+                TuningControl(workspace: workspace)
             }
             Spacer()
             Text("ROUGH\nIS ENOUGH.").font(.system(size: 10, weight: .medium, design: .monospaced)).tracking(1.5)
@@ -493,6 +494,7 @@ struct TabCanvas: View {
 struct NoteInspector: View {
     @ObservedObject var workspace: Workspace
     var body: some View {
+        ScrollView {
         VStack(alignment: .leading, spacing: 20) {
             HStack {
                 overline("NOTE INSPECTOR")
@@ -506,7 +508,7 @@ struct NoteInspector: View {
                     Spacer()
                     VStack(alignment: .trailing, spacing: 4) {
                         Text(event.lane.title).font(.system(size: 12, weight: .medium))
-                        Text("\(event.string)번 줄 · \(workspace.project.tuning[event.string - 1])").font(.system(size: 11)).foregroundStyle(Palette.secondary)
+                        Text("\(event.string)번 줄 · \(workspace.project.stringLabel(event.string))").font(.system(size: 11)).foregroundStyle(Palette.secondary)
                     }
                 }
                 Divider()
@@ -515,7 +517,7 @@ struct NoteInspector: View {
                     PositionTimeField(workspace: workspace, event: event)
                     fieldLabel("기타 줄")
                     Picker("줄", selection: binding(\.string)) {
-                        ForEach(1...6, id: \.self) { Text("\($0)번 · \(workspace.project.tuning[$0 - 1])").tag($0) }
+                        ForEach(1...6, id: \.self) { Text("\($0)번 · \(workspace.project.stringLabel($0))").tag($0) }
                     }.labelsHidden()
                     fieldLabel("프렛")
                     Picker("프렛", selection: binding(\.fret)) {
@@ -525,6 +527,7 @@ struct NoteInspector: View {
                     Text("같은 음도 여러 줄에서 낼 수 있습니다.\n실제 운지는 직접 선택하세요.")
                         .font(.system(size: 10)).foregroundStyle(Palette.secondary).lineSpacing(3)
                 }
+                PitchAlternatives(workspace: workspace, event: event).id(event.id)
                 Divider()
                 Toggle("잠정 프렛으로 표시", isOn: binding(\.tentative)).font(.system(size: 11))
                 if workspace.showLengths {
@@ -564,7 +567,8 @@ struct NoteInspector: View {
                 shortcut("[  ]", "반복 시작 / 끝")
                 shortcut("⌘ S", "프로젝트 저장")
             }.padding(.top, 12)
-        }.padding(20).frame(maxHeight: .infinity, alignment: .topLeading).background(Palette.panel)
+        }.padding(20)
+        }.frame(maxHeight: .infinity, alignment: .topLeading).background(Palette.panel)
     }
     private func binding<Value>(_ path: WritableKeyPath<TabEvent, Value>, transform: @escaping (Value) -> Value = { $0 }) -> Binding<Value> {
         Binding(get: { (workspace.selected ?? TabEvent(time: 0, lane: .left, string: 1))[keyPath: path] },
