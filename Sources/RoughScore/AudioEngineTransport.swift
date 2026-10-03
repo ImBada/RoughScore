@@ -205,18 +205,24 @@ final class AudioEngineTransportFactory {
     }
     private var references: [URL: Reference] = [:]
     private var pending: AudioEngineGraph?
+    private var pendingDirectory: URL?
     func prepare(_ audio: PreparedAudio) throws {
         let graph = try AudioEngineGraph(audio: audio)
         references = references.filter { $0.value.graph != nil }
         for source in [ListeningSource.right, .left, .stereo] {
             references[audio.url(for: source)] = Reference(graph, source)
         }
-        pending = graph
+        pending = graph; pendingDirectory = audio.directory
+    }
+    func discard(_ audio: PreparedAudio) {
+        guard pendingDirectory == audio.directory else { return }
+        pending?.stop(); pending = nil; pendingDirectory = nil
+        references = references.filter { $0.value.graph != nil }
     }
     func player(_ url: URL) throws -> any AudioPlayerTransport {
         guard let reference = references[url], let graph = reference.graph else { throw AudioIssue.unsupported }
         let player = AudioEnginePlayer(graph: graph, source: reference.source)
-        if pending === graph { pending = nil }
+        if pending === graph { pending = nil; pendingDirectory = nil }
         return player
     }
 }

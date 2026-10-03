@@ -38,6 +38,22 @@ struct EngineTransportTests {
         }
     }
 
+    @Test(arguments: [AVAudioFrameCount(1), 3528])
+    func nativeEndOfFileStopsTruthfullyIncludingOneFrameAssets(frames: AVAudioFrameCount) async throws {
+        let url = try engineFixture(frames: frames); defer { try? FileManager.default.removeItem(at: url) }
+        let w = Workspace(services: quietEngineServices()); defer { w.shutdown() }
+        #expect(await w.loadAudio(at: url)?.value == true)
+        for rate: Float in [0.5, 0.75, 1] {
+            w.rate = rate; w.seek(0); w.togglePlayback()
+            for _ in 0..<100 {
+                w.tick()
+                if !w.playing { break }
+                try await Task.sleep(for: .milliseconds(10))
+            }
+            #expect(!w.playing && w.cursor.isFinite && w.cursor >= 0 && w.cursor < w.project.duration)
+        }
+    }
+
     @Test func twoWorkspacesKeepSeparateGraphsAndShutdownStopsOnlyItsOwner() async throws {
         let url = try engineFixture(); defer { try? FileManager.default.removeItem(at: url) }
         let captureA = EngineCapture(), captureB = EngineCapture()
@@ -71,13 +87,14 @@ struct EngineTransportTests {
         return services
     }
 
-    private func engineFixture() throws -> URL {
+    private func engineFixture(frames: AVAudioFrameCount = 264600) throws -> URL {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("RoughScore-engine-state-" + UUID().uuidString + ".caf")
         let format = AVAudioFormat(standardFormatWithSampleRate: 44100, channels: 2)!
-        let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 264600)!
-        buffer.frameLength = 264600
-        for channel in 0..<2 { buffer.floatChannelData![channel].initialize(repeating: 0, count: 264600) }
-        buffer.floatChannelData![0][49833] = 0.8; buffer.floatChannelData![1][51777] = -0.6
+        let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frames)!
+        buffer.frameLength = frames
+        for channel in 0..<2 { buffer.floatChannelData![channel].initialize(repeating: 0, count: Int(frames)) }
+        if frames > 51777 { buffer.floatChannelData![0][49833] = 0.8; buffer.floatChannelData![1][51777] = -0.6 }
+        else { buffer.floatChannelData![0][0] = 0.8; buffer.floatChannelData![1][0] = -0.6 }
         let file = try AVAudioFile(forWriting: url, settings: format.settings)
         try file.write(from: buffer); file.close()
         return url

@@ -992,7 +992,10 @@ final class Workspace: ObservableObject {
         var committed = false
         defer {
             if !committed {
-                if let audio = staged?.audio { try? FileManager.default.removeItem(at: audio.directory) }
+                if let audio = staged?.audio {
+                    services.discardPreparedTransport(audio)
+                    try? FileManager.default.removeItem(at: audio.directory)
+                }
                 if let url = staged?.demoURL { try? FileManager.default.removeItem(at: url) }
             }
             if loadOperation?.id == operation.id {
@@ -1037,7 +1040,10 @@ final class Workspace: ObservableObject {
                     fingerprint = try? await AudioPreparation.fingerprint(original)
                 }
                 try requireCurrent(operation)
-                if let audio = candidate.audio { try? FileManager.default.removeItem(at: audio.directory) }
+                if let audio = candidate.audio {
+                    services.discardPreparedTransport(audio)
+                    try? FileManager.default.removeItem(at: audio.directory)
+                }
                 candidate.project = decoded.invalidatingUnverifiedAnalysis(fingerprint: fingerprint)
                 candidate.audio = nil
                 candidate.offlineReason = error.localizedDescription
