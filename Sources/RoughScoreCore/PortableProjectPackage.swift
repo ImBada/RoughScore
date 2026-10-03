@@ -72,11 +72,16 @@ public enum PortableProjectPackage {
         var ownedStageInfo = stat()
         guard fstatat(parent.fd, stageName, &ownedStageInfo, AT_SYMLINK_NOFOLLOW) == 0 else { throw posixError() }
         var committed = false
+        var ownedStage: Directory?
         defer {
-            // Never remove somebody else's directory if its name was replaced during the operation.
-            if !committed, parent.matches(stageName, ownedStageInfo) { try? FileManager.default.removeItem(at: stageURL) }
+            // Only operation-created entries, through pinned descriptors; never traverse stageURL.
+            if !committed, parent.matches(stageName, ownedStageInfo) {
+                ownedStage?.removeCreatedEntries()
+                if parent.matches(stageName, ownedStageInfo) { _ = unlinkat(parent.fd, stageName, AT_REMOVEDIR) }
+            }
         }
-        let stage = try Directory(stageURL)
+        let stage = try Directory(parent: parent, name: stageName)
+        ownedStage = stage
         guard sameFile(stage.info, ownedStageInfo) else { throw PackageError.unsafePath }
         var assets = candidate.assets ?? []
         if candidate.assets == nil, let legacyPath = candidate.audioPath {
@@ -84,9 +89,7 @@ public enum PortableProjectPackage {
             assets = [AudioAsset(reference: AudioReference(path: legacyPath))]
         }
         let sourceDirectory = try sourceRoot.map { try Directory($0.resolvingSymlinksInPath().standardizedFileURL) }
-        if !assets.isEmpty {
-            guard mkdirat(stage.fd, "Media", 0o700) == 0 else { throw posixError() }
-        }
+        let media = try assets.isEmpty ? nil : stage.createDirectory("Media")
         for index in assets.indices {
             _ = try assets[index].validated()
             try check(cancellation)
@@ -102,7 +105,7 @@ public enum PortableProjectPackage {
             let ext = URL(fileURLWithPath: assets[index].reference.path).pathExtension.lowercased()
             let safeExtension = !ext.isEmpty && ext.count <= 16 && ext.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber) }) ? ext : "audio"
             let path = "Media/" + assets[index].id.uuidString + "." + safeExtension
-            let output = try stage.createFile(path)
+            let output = try media!.createFile(URL(fileURLWithPath: path).lastPathComponent)
             let copiedHash = try copy(source, to: output, cancellation: cancellation, hooks: hooks)
             let identity = try verifiedIdentity(stage.file(path), cancellation: cancellation)
             guard identity.sha256 == copiedHash, try fingerprint(source, cancellation: cancellation) == copiedHash,
@@ -127,11 +130,13 @@ public enum PortableProjectPackage {
         try jsonFile.handle.write(contentsOf: json)
         try jsonFile.handle.synchronize()
         try hooks.checkpoint(.validating)
-        let validated = try read(at: stageURL, cancellation: cancellation, hooks: hooks)
-        guard validated.project == candidate else { throw PackageError.invalidPackage }
+        let validated = try validatedRead(at: stageURL, cancellation: cancellation, hooks: hooks)
+        guard validated.snapshot.project == candidate else { throw PackageError.invalidPackage }
         guard fsync(stage.fd) == 0 else { throw posixError() }
         try hooks.checkpoint(.committing)
-        try check(cancellation) // Final commit fence. No cancellation/error-producing work follows a successful rename.
+        try check(cancellation)
+        // Retain the descriptors and mutation state used to validate JSON, media and every directory.
+        try validated.fence.revalidate()
         guard parent.matches(stageName, stage.info), parent.isAt(parentURL) else { throw PackageError.unsafePath }
         // RENAME_EXCL atomically rejects collisions, including ones created after the initial existence check.
         guard renameatx_np(parent.fd, stageName, parent.fd, destinationName, UInt32(RENAME_EXCL)) == 0 else {
@@ -147,6 +152,11 @@ public enum PortableProjectPackage {
     }
 
     static func read(at root: URL, cancellation: () throws -> Void = {}, hooks: Hooks) throws -> Snapshot {
+        try validatedRead(at: root, cancellation: cancellation, hooks: hooks).snapshot
+    }
+
+    private static func validatedRead(at root: URL, cancellation: () throws -> Void, hooks: Hooks) throws
+        -> (snapshot: Snapshot, fence: ValidationFence) {
         try check(cancellation)
         guard root.isFileURL else { throw PackageError.unsafePath }
         let canonical = root.standardizedFileURL
@@ -175,13 +185,11 @@ public enum PortableProjectPackage {
             verifiedFiles.append((asset.reference.path, file))
         }
         // Strict contract: no undeclared files, directories, device nodes, or symlinks (even unused ones).
-        try directory.validateTree(expected: expected, cancellation: cancellation, hooks: hooks)
-        for (path, file) in verifiedFiles {
-            guard file.unchanged, sameFile(try directory.file(path).info, file.info) else { throw PackageError.sourceChanged }
-        }
-        guard directory.isAt(canonical) else { throw PackageError.sourceChanged }
+        let directories = try directory.validateTree(expected: expected, cancellation: cancellation, hooks: hooks)
+        let fence = ValidationFence(root: canonical, directory: directory, files: verifiedFiles, directories: directories)
         try check(cancellation)
-        return Snapshot(root: canonical, project: project)
+        try fence.revalidate()
+        return (Snapshot(root: canonical, project: project), fence)
     }
 
     private static func check(_ cancellation: () throws -> Void) throws {
@@ -195,6 +203,29 @@ public enum PortableProjectPackage {
     }
     private static func sameFile(_ a: stat, _ b: stat) -> Bool { a.st_dev == b.st_dev && a.st_ino == b.st_ino }
     private static func regular(_ s: stat) -> Bool { (s.st_mode & S_IFMT) == S_IFREG }
+    private static func sameState(_ a: stat, _ b: stat) -> Bool {
+        sameFile(a, b) && a.st_mode == b.st_mode && a.st_size == b.st_size &&
+            a.st_mtimespec.tv_sec == b.st_mtimespec.tv_sec && a.st_mtimespec.tv_nsec == b.st_mtimespec.tv_nsec &&
+            a.st_ctimespec.tv_sec == b.st_ctimespec.tv_sec && a.st_ctimespec.tv_nsec == b.st_ctimespec.tv_nsec
+    }
+
+    private struct ValidationFence {
+        let root: URL
+        let directory: Directory
+        let files: [(String, File)]
+        let directories: [(String, Directory)]
+        func revalidate() throws {
+            for (path, file) in files {
+                guard file.unchanged, sameState(try directory.file(path).info, file.info) else {
+                    throw PackageError.sourceChanged
+                }
+            }
+            for (name, child) in directories {
+                guard child.unchanged, directory.matches(name, child.info) else { throw PackageError.sourceChanged }
+            }
+            guard directory.unchanged, directory.isAt(root) else { throw PackageError.sourceChanged }
+        }
+    }
 
     private final class File {
         let handle: FileHandle
@@ -212,26 +243,51 @@ public enum PortableProjectPackage {
         }
         var unchanged: Bool {
             var s = stat()
-            return fstat(fd, &s) == 0 && sameFile(s, info) && s.st_size == info.st_size &&
-                s.st_mtimespec.tv_sec == info.st_mtimespec.tv_sec && s.st_mtimespec.tv_nsec == info.st_mtimespec.tv_nsec &&
-                s.st_ctimespec.tv_sec == info.st_ctimespec.tv_sec && s.st_ctimespec.tv_nsec == info.st_ctimespec.tv_nsec
+            return fstat(fd, &s) == 0 && sameState(s, info)
         }
     }
     private final class Directory {
         let fd: Int32
         let info: stat
-        init(_ url: URL) throws {
+        private var createdFiles: [(String, File)] = []
+        private var createdDirectories: [(String, Directory)] = []
+        private init(descriptor: Int32) throws {
+            guard descriptor >= 0 else { throw posixError() }
+            fd = descriptor
+            var s = stat()
+            guard fstat(fd, &s) == 0, (s.st_mode & S_IFMT) == S_IFDIR else { close(fd); throw PackageError.unsafePath }
+            info = s
+        }
+        convenience init(parent: Directory, name: String) throws {
+            try self.init(descriptor: openat(parent.fd, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC))
+        }
+        convenience init(_ url: URL) throws {
             // Resolving and comparing components rejects symlink roots/ancestors rather than accepting string-prefix siblings.
             guard url.standardizedFileURL.pathComponents == url.resolvingSymlinksInPath().standardizedFileURL.pathComponents else {
                 throw PackageError.unsafePath
             }
-            fd = open(url.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
-            guard fd >= 0 else { throw posixError() }
-            var s = stat()
-            guard fstat(fd, &s) == 0 else { close(fd); throw posixError() }
-            info = s
+            try self.init(descriptor: open(url.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC))
         }
         deinit { close(fd) }
+        var unchanged: Bool {
+            var s = stat()
+            return fstat(fd, &s) == 0 && sameState(s, info)
+        }
+        func createDirectory(_ name: String) throws -> Directory {
+            guard try components(name).count == 1 else { throw PackageError.unsafePath }
+            guard mkdirat(fd, name, 0o700) == 0 else { throw posixError() }
+            let child = try Directory(parent: self, name: name)
+            createdDirectories.append((name, child))
+            return child
+        }
+        func removeCreatedEntries() {
+            // Unknown or replaced entries are left alone, even if that leaves a nonempty owned stage.
+            for (name, file) in createdFiles where matches(name, file.info) { _ = unlinkat(fd, name, 0) }
+            for (name, child) in createdDirectories where matches(name, child.info) {
+                child.removeCreatedEntries()
+                if matches(name, child.info) { _ = unlinkat(fd, name, AT_REMOVEDIR) }
+            }
+        }
         func exists(_ path: String) -> Bool {
             var s = stat()
             return fstatat(fd, path, &s, AT_SYMLINK_NOFOLLOW) == 0 || errno != ENOENT
@@ -246,7 +302,12 @@ public enum PortableProjectPackage {
                 url.pathComponents == url.resolvingSymlinksInPath().standardizedFileURL.pathComponents
         }
         func file(_ path: String) throws -> File { try openFile(path, create: false) }
-        func createFile(_ path: String) throws -> File { try openFile(path, create: true) }
+        func createFile(_ name: String) throws -> File {
+            guard try components(name).count == 1 else { throw PackageError.unsafePath }
+            let file = try openFile(name, create: true)
+            createdFiles.append((name, file))
+            return file
+        }
         private func openFile(_ path: String, create: Bool) throws -> File {
             let parts = try components(path)
             var current = dup(fd)
@@ -262,9 +323,11 @@ public enum PortableProjectPackage {
             guard descriptor >= 0 else { throw PackageError.invalidResource }
             return try File(fd: descriptor)
         }
-        func validateTree(expected: Set<String>, cancellation: () throws -> Void, hooks: Hooks) throws {
+        func validateTree(expected: Set<String>, cancellation: () throws -> Void, hooks: Hooks) throws -> [(String, Directory)] {
             var seen = Set<String>()
-            func visit(_ descriptor: Int32, _ prefix: String) throws {
+            var directories: [(String, Directory)] = []
+            func visit(_ directory: Directory, _ prefix: String) throws {
+                let descriptor = directory.fd
                 guard let stream = fdopendir(dup(descriptor)) else { throw posixError() }
                 defer { closedir(stream) }
                 while true {
@@ -282,18 +345,20 @@ public enum PortableProjectPackage {
                     var s = stat()
                     guard fstatat(descriptor, name, &s, AT_SYMLINK_NOFOLLOW) == 0 else { throw posixError() }
                     if (s.st_mode & S_IFMT) == S_IFDIR, path == "Media", expected.count > 1 {
-                        let child = openat(descriptor, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
-                        guard child >= 0 else { throw PackageError.unsafePath }
-                        defer { close(child) }
+                        let child = try Directory(parent: directory, name: name)
+                        guard sameFile(child.info, s) else { throw PackageError.sourceChanged }
+                        directories.append((name, child))
                         try visit(child, "Media/")
                     } else {
                         guard regular(s), expected.contains(path) else { throw PackageError.invalidResource }
                         seen.insert(path)
                     }
                 }
+                guard directory.unchanged else { throw PackageError.sourceChanged }
             }
-            try visit(fd, "")
+            try visit(self, "")
             guard seen == expected else { throw PackageError.invalidResource }
+            return directories
         }
     }
     private static func fingerprint(_ file: File, cancellation: () throws -> Void) throws -> String {

@@ -373,4 +373,216 @@ struct PortableProjectPackageTests {
         #expect(try PortableProjectPackage.read(at: snapshot.root).project == project)
     }
 
+    private func stage(_ parent: URL) throws -> URL {
+        let name = try #require(FileManager.default.contentsOfDirectory(atPath: parent.path).first { $0.hasPrefix(".roughscore-stage-") })
+        return parent.appendingPathComponent(name)
+    }
+
+    @Test func cleanupMustPreserveForeignStageWhenParentPathIsRebound() throws {
+        let f = try Fixture(); let root = f.root
+        let parent = root.appendingPathComponent("parent")
+        let displaced = root.appendingPathComponent("displaced")
+        try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: false)
+        var foreignMarker: URL?
+        var reached = false
+        let hooks = PortableProjectPackage.Hooks(checkpoint: { phase in
+            if phase == .committing {
+                reached = true
+                let owned = try stage(parent)
+                try FileManager.default.moveItem(at: parent, to: displaced)
+                try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: false)
+                let foreign = parent.appendingPathComponent(owned.lastPathComponent)
+                try FileManager.default.createDirectory(at: foreign, withIntermediateDirectories: false)
+                let marker = foreign.appendingPathComponent("foreign.txt")
+                try Data("FOREIGN MUST SURVIVE".utf8).write(to: marker)
+                foreignMarker = marker
+                throw Failure.injected
+            }
+        })
+        #expect(throws: Failure.injected) {
+            try PortableProjectPackage.collect(ScoreProject(), to: parent.appendingPathComponent("out.roughscorepkg"), hooks: hooks)
+        }
+        #expect(reached)
+        let marker = try #require(foreignMarker)
+        print("REVIEW_PARENT_REBOUND foreignMarkerExists=\(FileManager.default.fileExists(atPath: marker.path)) displacedOwnedStageCount=\(try FileManager.default.contentsOfDirectory(atPath: displaced.path).count)")
+        #expect(FileManager.default.fileExists(atPath: marker.path))
+        #expect(try Data(contentsOf: marker) == Data("FOREIGN MUST SURVIVE".utf8))
+        #expect(try FileManager.default.contentsOfDirectory(atPath: displaced.path).isEmpty)
+    }
+
+    @Test func writerMustRejectStagedJSONMutationAfterValidationBeforeRename() throws {
+        let f = try Fixture(); let root = f.root
+        let destination = root.appendingPathComponent("out.roughscorepkg")
+        var reached = false
+        let hooks = PortableProjectPackage.Hooks(checkpoint: { phase in
+            if phase == .committing {
+                reached = true
+                try Data("{broken".utf8).write(to: stage(root).appendingPathComponent("project.json"))
+            }
+        })
+        #expect(throws: (any Error).self) {
+            try PortableProjectPackage.collect(ScoreProject(), to: destination, hooks: hooks)
+        }
+        #expect(reached)
+        print("REVIEW_COMMIT_MUTATION destinationExists=\(FileManager.default.fileExists(atPath: destination.path))")
+        #expect(!FileManager.default.fileExists(atPath: destination.path))
+        #expect(throws: (any Error).self) { try PortableProjectPackage.read(at: destination) }
+    }
+
+    @Test func readerMustRejectUndeclaredEntryInsertedAtEnumerationEOF() throws {
+        let f = try Fixture(); let root = f.root
+        let destination = root.appendingPathComponent("out.roughscorepkg")
+        _ = try PortableProjectPackage.collect(ScoreProject(), to: destination)
+        var reached = false
+        let hooks = PortableProjectPackage.Hooks(readDirectory: { stream in
+            let entry = readdir(stream)
+            if entry == nil && !reached {
+                reached = true
+                try! Data("UNDECLARED".utf8).write(to: destination.appendingPathComponent("foreign.txt"))
+                errno = 0
+            }
+            return entry
+        })
+        #expect(throws: (any Error).self) { try PortableProjectPackage.read(at: destination, hooks: hooks) }
+        #expect(reached)
+        print("REVIEW_ENUMERATION_MUTATION foreignExists=\(FileManager.default.fileExists(atPath: destination.appendingPathComponent("foreign.txt").path))")
+        #expect(throws: (any Error).self) { try PortableProjectPackage.read(at: destination) }
+    }
+
+
+    @Test func committingRejectsFileAndDirectoryMutationsWithoutDeletingForeignEntries() throws {
+        for mutation in 0..<6 {
+            let f = try Fixture(); let source = try f.audio("source.caf")
+            let project = try f.project(source); let hash = try f.hash(source)
+            let inputBytes = try JSONEncoder().encode(project)
+            let destination = f.url("out.roughscorepkg")
+            var reached = false; var foreign: URL?
+            let bytes = Data("foreign replacement".utf8)
+            let hooks = PortableProjectPackage.Hooks(checkpoint: { phase in
+                guard phase == .committing else { return }
+                reached = true
+                let stage = try stage(f.root)
+                let media = stage.appendingPathComponent("Media")
+                let resource = media.appendingPathComponent(project.originalAsset!.id.uuidString + ".caf")
+                switch mutation {
+                case 0: // Same-length JSON mutation cannot escape a size-only check.
+                    let json = stage.appendingPathComponent("project.json")
+                    var data = try Data(contentsOf: json); data[0] = 33; try data.write(to: json)
+                case 1:
+                    let handle = try FileHandle(forWritingTo: resource); defer { try? handle.close() }
+                    try handle.seek(toOffset: 100); try handle.write(contentsOf: Data([1, 2, 3, 4]))
+                case 2, 3:
+                    let entry = (mutation == 2 ? stage : media).appendingPathComponent("foreign.txt")
+                    try bytes.write(to: entry); foreign = entry
+                case 4:
+                    let json = stage.appendingPathComponent("project.json")
+                    // Atomic replacement preserves the previous inode until rename, defeating inode reuse.
+                    try bytes.write(to: json, options: .atomic); foreign = json
+                default:
+                    try FileManager.default.moveItem(at: media, to: stage.appendingPathComponent("displaced-media"))
+                    try FileManager.default.createDirectory(at: media, withIntermediateDirectories: false)
+                    let entry = media.appendingPathComponent("foreign.txt")
+                    try bytes.write(to: entry); foreign = entry
+                }
+            })
+            #expect(throws: (any Error).self) {
+                try PortableProjectPackage.collect(project, to: destination, hooks: hooks)
+            }
+            #expect(reached && !FileManager.default.fileExists(atPath: destination.path))
+            #expect(try f.hash(source) == hash)
+            #expect(try JSONEncoder().encode(project) == inputBytes)
+            if let foreign { #expect(try Data(contentsOf: foreign) == bytes) }
+            else { #expect(try f.children() == ["source.caf"]) }
+        }
+    }
+
+    @Test func enumerationEOFRejectsRootAndMediaInsertRemoveAndReplacement() throws {
+        for mutation in 0..<4 {
+            let f = try Fixture(); let source = try f.audio("source.caf")
+            let project = try f.project(source)
+            let snapshot = try PortableProjectPackage.collect(project, to: f.url("out.roughscorepkg"))
+            let media = snapshot.root.appendingPathComponent("Media")
+            let resource = try snapshot.resolve(assetID: project.originalAsset!.id)
+            let target = mutation == 0 ? snapshot.root : media
+            var targetInfo = stat(); #expect(lstat(target.path, &targetInfo) == 0)
+            var reached = false
+            let hooks = PortableProjectPackage.Hooks(readDirectory: { stream in
+                let entry = readdir(stream)
+                var current = stat()
+                if entry == nil, !reached, fstat(dirfd(stream), &current) == 0,
+                   current.st_dev == targetInfo.st_dev, current.st_ino == targetInfo.st_ino {
+                    reached = true
+                    switch mutation {
+                    case 0, 1: try! Data("undeclared".utf8).write(to: target.appendingPathComponent("foreign.txt"))
+                    case 2: try! FileManager.default.removeItem(at: resource)
+                    default:
+                        try! FileManager.default.moveItem(at: media, to: snapshot.root.appendingPathComponent("displaced-media"))
+                        try! FileManager.default.createDirectory(at: media, withIntermediateDirectories: false)
+                        try! Data("replacement".utf8).write(to: media.appendingPathComponent("foreign.txt"))
+                    }
+                    errno = 0
+                }
+                return entry
+            })
+            #expect(throws: (any Error).self) { try PortableProjectPackage.read(at: snapshot.root, hooks: hooks) }
+            #expect(reached)
+            #expect(throws: (any Error).self) { try PortableProjectPackage.read(at: snapshot.root) }
+        }
+    }
+
+    @Test func parentRelocationBeforeRenameRejectsCommitAndCleansPinnedStage() throws {
+        let f = try Fixture(); let source = try f.audio("source.caf")
+        let project = try f.project(source); let hash = try f.hash(source)
+        let parent = f.url("parent"); let displaced = f.url("displaced")
+        try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: false)
+        var reached = false
+        let hooks = PortableProjectPackage.Hooks(checkpoint: { phase in
+            guard phase == .committing else { return }
+            reached = true
+            try FileManager.default.moveItem(at: parent, to: displaced)
+            try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: false)
+            try Data("existing destination".utf8).write(to: parent.appendingPathComponent("out.roughscorepkg"))
+        })
+        #expect(throws: (any Error).self) {
+            try PortableProjectPackage.collect(project, to: parent.appendingPathComponent("out.roughscorepkg"), hooks: hooks)
+        }
+        #expect(reached)
+        #expect(try FileManager.default.contentsOfDirectory(atPath: displaced.path).isEmpty)
+        #expect(try Data(contentsOf: parent.appendingPathComponent("out.roughscorepkg")) == Data("existing destination".utf8))
+        #expect(try f.hash(source) == hash)
+    }
+
+    @Test func replacedStageIsPreservedOnFailure() throws {
+        let f = try Fixture(); var foreign: URL?; var reached = false
+        let hooks = PortableProjectPackage.Hooks(checkpoint: { phase in
+            guard phase == .committing else { return }
+            reached = true
+            let owned = try stage(f.root)
+            try FileManager.default.moveItem(at: owned, to: f.url("displaced-stage"))
+            try FileManager.default.createDirectory(at: owned, withIntermediateDirectories: false)
+            let marker = owned.appendingPathComponent("foreign.txt")
+            try Data("foreign stage".utf8).write(to: marker); foreign = marker
+            throw Failure.injected
+        })
+        #expect(throws: Failure.injected) {
+            try PortableProjectPackage.collect(ScoreProject(), to: f.url("out.roughscorepkg"), hooks: hooks)
+        }
+        #expect(reached)
+        #expect(try Data(contentsOf: #require(foreign)) == Data("foreign stage".utf8))
+        #expect(FileManager.default.fileExists(atPath: f.url("displaced-stage/project.json").path))
+    }
+
+    @Test func mutationInFinalCancellationCallbackIsFencedBeforeCommit() throws {
+        let f = try Fixture(); var committing = false; var reached = false
+        let hooks = PortableProjectPackage.Hooks(checkpoint: { if $0 == .committing { committing = true } })
+        #expect(throws: (any Error).self) {
+            try PortableProjectPackage.collect(ScoreProject(), to: f.url("out.roughscorepkg"), cancellation: {
+                guard committing else { return }
+                reached = true
+                try Data("{broken".utf8).write(to: stage(f.root).appendingPathComponent("project.json"))
+            }, hooks: hooks)
+        }
+        #expect(reached)
+        #expect(try f.children().isEmpty)
+    }
 }
