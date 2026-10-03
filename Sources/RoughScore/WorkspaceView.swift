@@ -395,7 +395,7 @@ struct TabCanvas: View {
     var body: some View {
         GeometryReader { geometry in
             let span = (TimeBounds.span(start: workspace.windowStart, end: workspace.windowEnd) ?? 1)
-            let width = geometry.size.width - 78
+            let width: Double = Double(geometry.size.width) - 78
             ZStack(alignment: .topLeading) {
                 Canvas { context, size in
                     let start = workspace.windowStart
@@ -447,15 +447,7 @@ struct TabCanvas: View {
                     }
                     workspace.addEvent(time: time, string: string)
                 })
-                PointerTabNotes(workspace: workspace, events: workspace.visibleEvents, bounds: 48...(48 + max(1, width)),
-                    position: { note in
-                        let timeX: Double = 48 + (note.time - workspace.windowStart) / span * Double(width)
-                        return CGPoint(x: timeX, y: Double(68 + (note.string - 1) * 32))
-                    }, destination: { note, translation in
-                        (TimeBounds.timelineDragTime(note.time, start: workspace.windowStart, end: workspace.windowEnd, translation: translation.width, width: width) ?? note.time,
-                         note.string + Int(round(translation.height / 32)))
-                    }, displayScale: 1, compact: false,
-                    background: Palette.panel, ink: Palette.background, tentative: Palette.purple)
+                pointerNotes(width: width, span: span)
                 ForEach(workspace.visibleEvents) { event in
                     let shown = workspace.renderedEvent(event)
                     let x = 48 + (shown.time - workspace.windowStart) / span * width
@@ -467,6 +459,22 @@ struct TabCanvas: View {
             }
         }.coordinateSpace(name: "timeline-tab").clipped()
     }
+
+    private func pointerNotes(width: Double, span: Double) -> PointerTabNotes {
+        let position: (TabEvent) -> CGPoint = { note in
+            let timeX: Double = 48 + (note.time - workspace.windowStart) / span * width
+            return CGPoint(x: timeX, y: Double(68 + (note.string - 1) * 32))
+        }
+        let destination: (TabEvent, CGSize) -> (time: Double, string: Int) = { note, translation in
+            (TimeBounds.timelineDragTime(note.time, start: workspace.windowStart, end: workspace.windowEnd,
+                                         translation: translation.width, width: width) ?? note.time,
+             note.string + Int(round(translation.height / 32)))
+        }
+        return PointerTabNotes(workspace: workspace, events: workspace.visibleEvents, bounds: 48...(48 + max(1, width)),
+                               position: position, destination: destination, displayScale: 1, compact: false,
+                               background: Palette.panel, ink: Palette.background, tentative: Palette.purple)
+    }
+
 }
 
 struct NoteInspector: View {
