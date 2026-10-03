@@ -14,6 +14,7 @@ final class Workspace: ObservableObject {
     @Published var activeString = 6
     @Published var selectedID: UUID?
     @Published var cursor = 2.0
+    @Published private(set) var entryInterval = 0.05
     @Published var windowStart = 0.0
     @Published var windowLength = 12.0
     @Published var loopStart = 2.0
@@ -64,12 +65,21 @@ final class Workspace: ObservableObject {
     private var fretEntry = FretEntryBuffer()
     private var newlyCreatedID: UUID?
     private struct EditSnapshot {
+        let id = UUID()
         let events: [TabEvent]
         let selectedID: UUID?
         let activeString: Int
     }
     private var undoHistory: [EditSnapshot] = []
     private var redoHistory: [EditSnapshot] = []
+    private struct MemoSession {
+        let projectID: UUID
+        let eventID: UUID
+        let baseline: [TabEvent]
+        var undoID: UUID?
+    }
+    private var memoSession: MemoSession?
+    private var nativeTextObserver: AnyCancellable?
     private var savedProject: ScoreProject?
     private var autosaveTask: Task<Void, Never>?
     private var projectURL: URL?
@@ -111,6 +121,12 @@ final class Workspace: ObservableObject {
         self.services = services
         startupPending = awaitsStartup
         busy = awaitsStartup
+        nativeTextObserver = NotificationCenter.default.publisher(for: NSText.didChangeNotification).sink { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self, !self.closed else { return }
+                self.objectWillChange.send()
+            }
+        }
     }
 
     var canEdit: Bool { !busy && !closed }
@@ -125,6 +141,18 @@ final class Workspace: ObservableObject {
     var selected: TabEvent? { project.events.first { $0.id == selectedID } }
     var canUndo: Bool { !undoHistory.isEmpty }
     var canRedo: Bool { !redoHistory.isEmpty }
+    var canPerformUndo: Bool { canEdit && (services.nativeTextUndo()?.canUndo ?? canUndo) }
+    var canPerformRedo: Bool { canMutateNotes && (services.nativeTextUndo()?.canRedo ?? canRedo) }
+    func performUndo() {
+        guard canEdit else { return }
+        if let target = services.nativeTextUndo() { target.undo(); return }
+        undoEdit()
+    }
+    func performRedo() {
+        guard canMutateNotes else { return }
+        if let target = services.nativeTextUndo() { target.redo(); return }
+        redoEdit()
+    }
     var hasSaveLocation: Bool { projectURL != nil }
     var summary: AnalysisSummary? { project.analyses[source.rawValue] }
     var scoreSummary: AnalysisSummary? {
@@ -182,6 +210,7 @@ final class Workspace: ObservableObject {
 
     func seekForEditing(_ time: Double, lane: GuitarLane? = nil) {
         guard canMutateNotes, let bounded = TimeBounds.clamp(time, duration: project.duration) else { return }
+        endMemoEditing()
         fretEntry.reset(); newlyCreatedID = nil; selectedID = nil
         if let lane { selectLane(lane) }
         jumpToScoreTime(bounded); requestKeyboardFocus?()
@@ -272,13 +301,13 @@ final class Workspace: ObservableObject {
         status = "\(clockLabel(loopStart)) — \(clockLabel(loopEnd)) 반복 · Space로 재생"
     }
 
-    func addEvent(time: Double, string: Int) {
+    func addEvent(time: Double, string: Int, matchingExisting: Bool = true) {
         guard canMutateNotes else { return }
         guard time.isFinite, (1...6).contains(string) else { return }
         let snapped = TabMath.snap(time, beats: scoreSummary?.beats ?? [], enabled: snapToBeat)
         guard let actual = TimeBounds.clamp(snapped, duration: project.duration) else { return }
         activeString = string
-        if let existing = project.events.first(where: { $0.lane == lane && $0.string == string && abs($0.time - actual) < 0.04 }) {
+        if matchingExisting, let existing = project.events.first(where: { $0.lane == lane && $0.string == string && abs($0.time - actual) < 0.04 }) {
             select(existing); return
         }
         recordUndo()
@@ -291,6 +320,7 @@ final class Workspace: ObservableObject {
 
     func select(_ event: TabEvent) {
         guard canMutateNotes, let actual = project.events.first(where: { $0.id == event.id }) else { return }
+        endMemoEditing()
         fretEntry.reset(); newlyCreatedID = nil
         selectedID = actual.id; activeString = actual.string; selectLane(actual.lane); jumpToScoreTime(actual.time)
         requestKeyboardFocus?()
@@ -300,7 +330,7 @@ final class Workspace: ObservableObject {
     func inputDigit(_ digit: Int, at time: Double = ProcessInfo.processInfo.systemUptime) {
         guard canMutateNotes else { return }
         guard (0...9).contains(digit), time.isFinite else { return }
-        if selectedID == nil { addEvent(time: cursor, string: activeString) }
+        if selectedID == nil { addEvent(time: cursor, string: activeString, matchingExisting: false) }
         guard let selectedID, let index = project.events.firstIndex(where: { $0.id == selectedID }) else { return }
         guard let update = fretEntry.push(digit: digit, eventID: selectedID, now: time) else {
             status = "프렛은 0–24까지 입력할 수 있습니다"
@@ -313,6 +343,11 @@ final class Workspace: ObservableObject {
     }
 
     func updateSelected(_ change: (inout TabEvent) -> Void) {
+        endMemoEditing()
+        applySelected(change, coalescingMemo: false)
+    }
+
+    private func applySelected(_ change: (inout TabEvent) -> Void, coalescingMemo: Bool) {
         guard canMutateNotes else { return }
         guard let index = project.events.firstIndex(where: { $0.id == selectedID }) else { return }
         let original = project.events[index]
@@ -325,8 +360,16 @@ final class Workspace: ObservableObject {
         var candidate = project
         candidate.events[index] = updated
         guard (try? candidate.validated()) != nil else { return }
-        recordUndo(); fretEntry.reset(); newlyCreatedID = nil
+        if coalescingMemo, var session = memoSession, session.projectID == projectIdentity, session.eventID == original.id {
+            if session.undoID == nil { session.undoID = recordUndo(coalescingMemo: true) }
+            memoSession = session
+        } else { recordUndo() }
+        fretEntry.reset(); newlyCreatedID = nil
         project = candidate; activeString = updated.string; changed()
+        if var session = memoSession, project.events == session.baseline,
+           let undoID = session.undoID, undoHistory.last?.id == undoID {
+            undoHistory.removeLast(); session.undoID = nil; memoSession = session
+        }
     }
 
     func renderedEvent(_ event: TabEvent) -> TabEvent {
@@ -334,6 +377,7 @@ final class Workspace: ObservableObject {
     }
     func beginPositionDrag(_ event: TabEvent) {
         guard canMutateNotes else { return }
+        endMemoEditing()
         guard !busy, let actual = project.events.first(where: { $0.id == event.id }) else { return }
         fretEntry.reset(); newlyCreatedID = nil
         selectedID = actual.id; lane = actual.lane; activeString = actual.string
@@ -458,7 +502,11 @@ final class Workspace: ObservableObject {
     }
     func nudgeSelectedTime(by delta: Double) {
         guard canMutateNotes else { return }
-        guard let selected, delta.isFinite else { return }
+        guard delta.isFinite else { return }
+        guard let selected else {
+            if let time = TimeBounds.clamp(cursor + delta, duration: project.duration) { seekForEditing(time) }
+            return
+        }
         guard let time = TimeBounds.clamp(selected.time + delta, duration: project.duration) else { return }
         guard time != selected.time else { return }
         moveSelectedPosition(to: time); revealSelectedPosition()
@@ -477,7 +525,13 @@ final class Workspace: ObservableObject {
             select(event)
         }
     }
-    func markUnknown() { updateSelected { $0.fret = nil } }
+    func markUnknown() {
+        guard canMutateNotes else { return }
+        if selectedID == nil {
+            addEvent(time: cursor, string: activeString, matchingExisting: false)
+            finishEntry(); selectedID = nil // The next explicit arrow starts another sparse note.
+        } else { updateSelected { $0.fret = nil } }
+    }
     func toggleTentative() { updateSelected { $0.tentative.toggle() } }
     func finishEntry() { guard canMutateNotes else { return }; fretEntry.reset(); newlyCreatedID = nil }
     func clearSelection() {
@@ -497,20 +551,52 @@ final class Workspace: ObservableObject {
         return true
     }
 
-    private func recordUndo() {
-        undoHistory.append(EditSnapshot(events: project.events, selectedID: selectedID, activeString: activeString))
+    @discardableResult
+    func setEntryInterval(_ seconds: Double) -> Bool {
+        guard seconds.isFinite, seconds > 0, seconds <= 3600 else { return false }
+        entryInterval = seconds; return true
+    }
+    func advanceEntry() {
+        guard canMutateNotes, let time = TimeBounds.clamp(cursor + entryInterval, duration: project.duration) else { return }
+        finishEntry(); seekForEditing(time)
+        status = "다음 위치 \(clockLabel(cursor)) · 숫자 또는 ?로 입력"
+    }
+    func beginMemoEditing(eventID: UUID) {
+        guard canMutateNotes, selectedID == eventID else { return }
+        if memoSession?.eventID == eventID, memoSession?.projectID == projectIdentity { return }
+        endMemoEditing()
+        memoSession = MemoSession(projectID: projectIdentity, eventID: eventID, baseline: project.events)
+    }
+    func endMemoEditing(eventID: UUID? = nil) {
+        if let eventID, memoSession?.eventID != eventID { return }
+        memoSession = nil
+    }
+    func setMemo(_ text: String, eventID: UUID) {
+        guard canMutateNotes, selectedID == eventID else { return }
+        if memoSession == nil { beginMemoEditing(eventID: eventID) }
+        applySelected({ $0.memo = text }, coalescingMemo: memoSession?.eventID == eventID)
+    }
+
+    @discardableResult
+    private func recordUndo(coalescingMemo: Bool = false) -> UUID {
+        if !coalescingMemo { endMemoEditing() }
+        let snapshot = EditSnapshot(events: project.events, selectedID: selectedID, activeString: activeString)
+        undoHistory.append(snapshot)
         if undoHistory.count > 100 { undoHistory.removeFirst() }
         redoHistory.removeAll()
+        return snapshot.id
     }
     func undoEdit() {
         guard canEdit else { return }
         if positionDrag != nil { cancelPositionDrag(); return }
+        endMemoEditing()
         guard let snapshot = undoHistory.popLast() else { return }
         redoHistory.append(EditSnapshot(events: project.events, selectedID: selectedID, activeString: activeString))
         restore(snapshot); status = "입력 취소 · ⇧⌘Z로 다시 실행"
     }
     func redoEdit() {
         guard canMutateNotes else { return }
+        endMemoEditing()
         guard let snapshot = redoHistory.popLast() else { return }
         undoHistory.append(EditSnapshot(events: project.events, selectedID: selectedID, activeString: activeString))
         restore(snapshot); status = "입력 다시 실행"
@@ -531,6 +617,9 @@ final class Workspace: ObservableObject {
         dirty = savedProject.map { project != $0 } ?? true
         saveState = dirty ? (projectURL == nil ? .unsaved : .pending) : (projectURL == nil ? .unsaved : .saved)
     }
+    /// Await the currently scheduled revision; callers still inspect durable bytes and dirty state.
+    func awaitAutosave() async { await autosaveTask?.value }
+
     private func scheduleAutosave() {
         autosaveTask?.cancel(); autosaveTask = nil
         guard !closed, dirty, let url = projectURL else { return }
@@ -617,7 +706,7 @@ final class Workspace: ObservableObject {
 
     private func reserveLoad() -> LoadOperation? {
         guard !closed, !analyzing, loadOperation == nil, !busy || startupPending else { return nil }
-        cancelPositionDrag()
+        cancelPositionDrag(); endMemoEditing()
         let operation = LoadOperation(projectID: projectIdentity, snapshot: project)
         startupPending = false
         loadOperation = operation
@@ -800,6 +889,7 @@ final class Workspace: ObservableObject {
         projectIdentity = UUID(); projectURL = staged.projectURL; isDemo = staged.isDemo
         selectedID = nil; cursor = staged.isDemo ? 2 : 0; windowStart = 0
         positionDrag = nil; positionMagnetTargetID = nil; magnetDragInput = nil
+        memoSession = nil
         undoHistory.removeAll(); redoHistory.removeAll(); fretEntry.reset(); newlyCreatedID = nil
         inspectorVisible = false; scorePage = 0; followScore = true
         loopStart = staged.isDemo ? 2 : 0; loopEnd = staged.isDemo ? 6 : min(project.duration, 4)
@@ -919,6 +1009,7 @@ final class Workspace: ObservableObject {
     func shutdown() {
         guard !closed else { return }
         closed = true; startupPending = false
+        nativeTextObserver?.cancel(); nativeTextObserver = nil; memoSession = nil
         cancelLoading(); cancelAnalysis()
         busy = false
         autosaveTask?.cancel()

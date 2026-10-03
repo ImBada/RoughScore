@@ -43,7 +43,7 @@ final class TabKeyboardView: NSView {
         case 123: workspace.nudgeSelectedTime(by: event.modifierFlags.contains(.shift) ? -0.01 : -0.05)
         case 124: workspace.nudgeSelectedTime(by: event.modifierFlags.contains(.shift) ? 0.01 : 0.05)
         case 48: workspace.selectAdjacentEvent(backwards: event.modifierFlags.contains(.shift))
-        case 36, 76: workspace.finishEntry()
+        case 36, 76: workspace.advanceEntry()
         case 53: workspace.clearSelection()
         case 49:
             if event.modifierFlags.contains(.shift) { workspace.auditionSelected() }

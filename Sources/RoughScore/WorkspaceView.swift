@@ -236,10 +236,13 @@ struct WorkspaceView: View {
             Toggle("새 음 박 스냅", isOn: $workspace.snapToBeat).toggleStyle(.checkbox)
                 .help("새 음 입력에 적용 · 이동은 자유 드래그, Shift로 가까운 음에 정렬")
                 .disabled(workspace.scoreSummary?.beats.isEmpty ?? true)
-            Button { workspace.undoEdit() } label: { Image(systemName: "arrow.uturn.backward") }.disabled(!workspace.canUndo).help("실행 취소 · ⌘Z")
-            Button { workspace.redoEdit() } label: { Image(systemName: "arrow.uturn.forward") }.disabled(!workspace.canRedo || workspace.positionDrag != nil).help("다시 실행 · ⇧⌘Z")
+            Button { workspace.performUndo() } label: { Image(systemName: "arrow.uturn.backward") }.disabled(!workspace.canPerformUndo).help("실행 취소 · ⌘Z")
+            Button { workspace.performRedo() } label: { Image(systemName: "arrow.uturn.forward") }.disabled(!workspace.canPerformRedo).help("다시 실행 · ⇧⌘Z")
             Button { workspace.deleteSelected() } label: { Image(systemName: "trash") }.disabled(workspace.selected == nil).help("선택한 음 삭제 · Delete")
             Toggle("상세", isOn: $workspace.inspectorVisible).toggleStyle(.button).help("상세 편집 · I")
+            Button("다음 +\(Int(workspace.entryInterval * 1000))ms ↵") { workspace.advanceEntry() }
+                .disabled(!workspace.canMutateNotes).help("선택을 마치고 지정한 간격만큼 커서를 이동 · Enter")
+            EntryIntervalControl(workspace: workspace)
             Text(workspace.saveState.title).font(.system(size: 9)).foregroundStyle(Palette.secondary)
         }.font(.system(size: 10)).buttonStyle(.borderless).frame(height: 27)
     }
@@ -515,7 +518,9 @@ struct NoteInspector: View {
                 }
                 VStack(alignment: .leading, spacing: 8) {
                     fieldLabel("듣기 메모")
-                    TextField("예: 벤딩 / 다시 확인", text: binding(\.memo), axis: .vertical).lineLimit(3...5).textFieldStyle(.roundedBorder)
+                    MemoEditor(workspace: workspace, eventID: event.id)
+                        .frame(minHeight: 74, maxHeight: 110).background(Palette.elevated, in: RoundedRectangle(cornerRadius: 4))
+                        .accessibilityLabel("듣기 메모 · 일반 텍스트")
                 }
                 Button(role: .destructive) { workspace.deleteSelected() } label: { Label("이 메모 삭제", systemImage: "trash") }.font(.system(size: 11))
                 Spacer()
@@ -548,5 +553,23 @@ struct NoteInspector: View {
     private func fieldLabel(_ title: String) -> some View { Text(title).font(.system(size: 10)).foregroundStyle(Palette.secondary) }
     private func shortcut(_ key: String, _ title: String) -> some View {
         HStack { Text(key).font(.system(size: 10, design: .monospaced)).frame(width: 50, alignment: .leading); Text(title).font(.system(size: 10)) }.foregroundStyle(Palette.secondary)
+    }
+}
+
+private struct EntryIntervalControl: View {
+    @ObservedObject var workspace: Workspace
+    @State private var open = false
+    var body: some View {
+        Button { open.toggle() } label: { Image(systemName: "ellipsis") }
+            .help("다음 입력 간격 · 초 단위 위치만 이동하며 리듬을 지정하지 않습니다")
+            .popover(isPresented: $open) {
+                HStack {
+                    Text("다음 입력 간격")
+                    TextField("ms", value: Binding(get: { workspace.entryInterval * 1000 },
+                        set: { _ = workspace.setEntryInterval($0 / 1000) }), format: .number)
+                        .frame(width: 80).textFieldStyle(.roundedBorder)
+                    Text("ms")
+                }.font(.system(size: 11)).padding(14)
+            }
     }
 }
