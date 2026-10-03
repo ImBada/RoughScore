@@ -447,19 +447,18 @@ struct TabCanvas: View {
                     }
                     workspace.addEvent(time: time, string: string)
                 })
+                PointerTabNotes(workspace: workspace, events: workspace.visibleEvents, bounds: 48...(48 + max(1, width)),
+                    position: { note in
+                        CGPoint(x: 48 + (note.time - workspace.windowStart) / span * width,
+                                y: Double(68 + (note.string - 1) * 32))
+                    }, destination: { note, translation in
+                        (TimeBounds.timelineDragTime(note.time, start: workspace.windowStart, end: workspace.windowEnd, translation: translation.width, width: width) ?? note.time,
+                         note.string + Int(round(translation.height / 32)))
+                    }, displayScale: 1, compact: false,
+                    background: Palette.panel, ink: Palette.background, tentative: Palette.purple)
                 ForEach(workspace.visibleEvents) { event in
                     let shown = workspace.renderedEvent(event)
                     let x = 48 + (shown.time - workspace.windowStart) / span * width
-                    DraggableTabNote(workspace: workspace, event: event, space: "timeline-tab",
-                                     position: { note in
-                                         let timeX: Double = 48 + (note.time - workspace.windowStart) / span * Double(width)
-                                         return CGPoint(x: CGFloat(timeX), y: CGFloat(68 + (note.string - 1) * 32))
-                                     },
-                                     destination: { note, translation in
-                                         (TimeBounds.timelineDragTime(note.time, start: workspace.windowStart, end: workspace.windowEnd, translation: translation.width, width: width) ?? note.time,
-                                          note.string + Int(round(translation.height / 32)))
-                                     }, magnetTargets: workspace.visibleEvents, displayScale: 1,
-                                     compact: false, background: Palette.panel, ink: Palette.background, tentative: Palette.purple)
                     if workspace.showLengths, let length = event.length {
                         Text(length.symbol).font(.system(size: 22)).foregroundStyle(Palette.secondary).position(x: x, y: 272)
                     }

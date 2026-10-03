@@ -194,7 +194,7 @@ private struct SongOverview: View {
     }
 }
 
-private struct ScoreStaff: View {
+struct ScoreStaff: View {
     @ObservedObject var workspace: Workspace
     let row: ScoreSystem
     let lane: GuitarLane
@@ -325,17 +325,17 @@ private struct ScoreStaff: View {
                     workspace.addEvent(time: time, string: string)
                 })
                 .accessibilityLabel("\(lane.title) · \(clockLabel(row.start))부터 \(clockLabel(row.end)) · 클릭 후 숫자로 프렛 입력, 파형 드래그로 반복 구간 설정")
+                PointerTabNotes(workspace: workspace, events: events, bounds: left...(left + max(1, width)),
+                    position: { note in CGPoint(x: left + row.fraction(at: note.time) * width,
+                                                 y: stringTop + Double((note.string - 1) * 14)) },
+                    destination: { note, translation in
+                        (TimeBounds.scoreDragTime(note.time, system: row, translation: translation.width, width: width) ?? note.time,
+                         note.string + Int(round(translation.height / 14)))
+                    }, displayScale: displayScale, compact: true,
+                    background: Paper.background, ink: Paper.ink, tentative: Paper.muted)
                 ForEach(events) { event in
                     let shown = workspace.renderedEvent(event)
                     let x = left + row.fraction(at: shown.time) * width
-                    DraggableTabNote(workspace: workspace, event: event, space: "score-\(row.id)-\(lane.rawValue)",
-                                     position: { note in CGPoint(x: left + row.fraction(at: note.time) * width,
-                                                                  y: stringTop + Double((note.string - 1) * 14)) },
-                                     destination: { note, translation in
-                                         (TimeBounds.scoreDragTime(note.time, system: row, translation: translation.width, width: width) ?? note.time,
-                                          note.string + Int(round(translation.height / 14)))
-                                     }, magnetTargets: events, displayScale: displayScale,
-                                     compact: true, background: Paper.background, ink: Paper.ink, tentative: Paper.muted)
                     if workspace.showLengths, let length = event.length {
                         Text(length.symbol).font(.system(size: 20)).foregroundStyle(Paper.ink).position(x: x, y: 131 + offset)
                     }
