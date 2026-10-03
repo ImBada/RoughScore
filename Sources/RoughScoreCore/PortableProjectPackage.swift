@@ -87,6 +87,7 @@ public enum PortableProjectPackage {
             guard mkdirat(stage.fd, "Media", 0o700) == 0 else { throw posixError() }
         }
         for index in assets.indices {
+            _ = try assets[index].validated()
             try check(cancellation)
             let source: File
             switch assets[index].reference.kind {

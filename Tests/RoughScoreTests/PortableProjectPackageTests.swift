@@ -127,6 +127,11 @@ struct PortableProjectPackageTests {
         #expect(snapshot.project.originalAsset?.identity == (try f.identity(original)))
         #expect(snapshot.project.analyses.isEmpty)
         #expect(legacy.assets == nil && legacy.audioPath == original.path)
+        var malformed = legacy; malformed.audioPath = "relative.caf"
+        #expect(throws: ProjectError.self) {
+            try PortableProjectPackage.collect(malformed, to: f.url("relative.roughscorepkg"))
+        }
+        #expect(!FileManager.default.fileExists(atPath: f.url("relative.roughscorepkg").path))
     }
 
     @Test func noMediaIsExplicitButMissingDeclaredMediaFails() throws {
