@@ -454,7 +454,8 @@ struct PortableProjectPackageTests {
         for mutation in 0..<6 {
             let f = try Fixture(); let source = try f.audio("source.caf")
             let project = try f.project(source); let hash = try f.hash(source)
-            let inputBytes = try JSONEncoder().encode(project)
+            let inputEncoder = JSONEncoder(); inputEncoder.outputFormatting = .sortedKeys
+            let inputBytes = try inputEncoder.encode(project)
             let destination = f.url("out.roughscorepkg")
             var reached = false; var foreign: URL?
             let bytes = Data("foreign replacement".utf8)
@@ -490,7 +491,7 @@ struct PortableProjectPackageTests {
             }
             #expect(reached && !FileManager.default.fileExists(atPath: destination.path))
             #expect(try f.hash(source) == hash)
-            #expect(try JSONEncoder().encode(project) == inputBytes)
+            #expect(try inputEncoder.encode(project) == inputBytes)
             if let foreign { #expect(try Data(contentsOf: foreign) == bytes) }
             else { #expect(try f.children() == ["source.caf"]) }
         }
