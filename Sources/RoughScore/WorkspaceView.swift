@@ -44,6 +44,7 @@ struct WorkspaceView: View {
                         audioConnectionBar
                         transport
                         quickEditBar
+                        BulkSelectionBar(workspace: workspace)
                         ScoreSheetView(workspace: workspace)
                     }.padding(18)
                 } else { ScrollView {
@@ -51,6 +52,7 @@ struct WorkspaceView: View {
                         heading
                         transport
                         quickEditBar
+                        BulkSelectionBar(workspace: workspace)
                         audioConnectionBar
                         audioPanel
                         tabPanel
@@ -418,6 +420,14 @@ struct TabCanvas: View {
                         context.stroke(line, with: .color(.white.opacity(0.17)), lineWidth: string >= 4 ? 1.3 : 0.8)
                         context.draw(Text(workspace.project.tuning[string - 1]).font(.system(size: 11, weight: .medium, design: .monospaced)).foregroundColor(Palette.secondary), at: CGPoint(x: 22, y: y))
                     }
+                    if let range = workspace.selectionRange,
+                       workspace.project.events.contains(where: { workspace.selection.ids.contains($0.id) && $0.lane == workspace.lane }) {
+                        let start = max(workspace.windowStart, range.start), end = min(workspace.windowEnd, range.end)
+                        if end > start {
+                            context.fill(Path(CGRect(x: x(start), y: 43, width: x(end) - x(start), height: 201)),
+                                         with: .color(Palette.mint.opacity(0.10)))
+                        }
+                    }
                     if workspace.cursor >= workspace.windowStart && workspace.cursor <= workspace.windowEnd {
                         var cursor = Path(); cursor.move(to: CGPoint(x: x(workspace.cursor), y: 43)); cursor.addLine(to: CGPoint(x: x(workspace.cursor), y: size.height - 20))
                         context.stroke(cursor, with: .color(Palette.mint.opacity(0.6)), style: StrokeStyle(lineWidth: 1, dash: [4, 4]))
@@ -447,6 +457,9 @@ struct TabCanvas: View {
                     }
                     workspace.addEvent(time: time, string: string)
                 })
+                TabRangeSurface(workspace: workspace, lane: workspace.lane) { x in
+                    workspace.windowStart + min(1, max(0, (x - 48) / width)) * span
+                }
                 pointerNotes(width: width, span: span)
                 ForEach(workspace.visibleEvents) { event in
                     let shown = workspace.renderedEvent(event)

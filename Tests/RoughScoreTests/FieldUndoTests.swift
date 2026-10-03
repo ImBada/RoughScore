@@ -282,6 +282,62 @@ struct FieldUndoTests {
         workspace.redoEdit(); #expect(workspace.selected?.memo == "redo")
     }
 
+    @Test func actualMemoAndNumericFieldsRetainNativeClipboardUndoBesideBulkSelection() throws {
+        let box = TextTargetBox()
+        let workspace = Workspace(services: services(box)); defer { workspace.shutdown() }
+        workspace.project = ScoreProject(duration: 20, events: [
+            TabEvent(time: 2, lane: .left, string: 3, fret: 7),
+            TabEvent(time: 2.5, lane: .left, string: 4, memo: "keep")])
+        #expect(workspace.selectRange(lane: .left, from: 1, to: 3))
+        let memoHost = try HostedInspector(workspace); defer { memoHost.close() }
+        let editor = memoHost.editor
+        #expect(memoHost.window.makeFirstResponder(editor))
+        box.target = NativeTextUndoTarget(editor.history, editor: editor)
+        let pasteboard = NSPasteboard(name: .init("RoughScore-native-clipboard-" + UUID().uuidString))
+        defer { pasteboard.releaseGlobally() }
+        pasteboard.setString("native memo", forType: .string)
+        let selected = workspace.selectedIDs
+        #expect(!workspace.copySelection(to: pasteboard) && !workspace.pasteSelection(from: pasteboard))
+        #expect(pasteboard.string(forType: .string) == "native memo")
+        editor.history.beginUndoGrouping()
+        #expect(editor.readSelection(from: pasteboard, type: .string))
+        editor.history.endUndoGrouping(); memoHost.settle()
+        #expect(workspace.selected?.memo == editor.string && editor.string.contains("native memo"))
+        editor.setSelectedRange(NSRange(location: 0, length: 6))
+        #expect(editor.writeSelection(to: pasteboard, types: editor.writablePasteboardTypes))
+        #expect(pasteboard.string(forType: .string) == String(editor.string.prefix(6)))
+        workspace.performUndo(); memoHost.settle()
+        #expect(!editor.string.contains("native memo") && workspace.selectedIDs == selected)
+        workspace.performRedo(); memoHost.settle(); #expect(editor.string.contains("native memo"))
+        #expect(workspace.project.events.count == 2)
+        box.target = nil
+        let actual = try #require(workspace.selected)
+        let numeric = NotePointerTests.Host(PositionTimeField(workspace: workspace, event: actual), height: 60)
+        defer { numeric.close() }
+        let field = try #require(numeric.descendants().compactMap { $0 as? NSTextField }.first)
+        #expect(numeric.window.makeFirstResponder(field))
+        let fieldEditor = try #require(field.currentEditor() as? NSTextView)
+        let manager = try #require(fieldEditor.undoManager)
+        manager.groupsByEvent = false; manager.removeAllActions()
+        box.target = NativeTextUndoTarget(manager, editor: fieldEditor)
+        let before = workspace.project
+        let original = fieldEditor.string
+        fieldEditor.setSelectedRange(NSRange(location: 0, length: (original as NSString).length))
+        pasteboard.clearContents(); pasteboard.setString("3.125", forType: .string)
+        manager.beginUndoGrouping()
+        #expect(fieldEditor.readSelection(from: pasteboard, type: .string))
+        manager.endUndoGrouping()
+        #expect(fieldEditor.string == "3.125" && workspace.project == before)
+        #expect(!workspace.pasteSelection(from: pasteboard))
+        workspace.performUndo(); #expect(fieldEditor.string == original && workspace.project == before)
+        workspace.performRedo(); #expect(fieldEditor.string == "3.125" && workspace.project == before)
+        fieldEditor.setSelectedRange(NSRange(location: 0, length: 5))
+        #expect(fieldEditor.writeSelection(to: pasteboard, types: fieldEditor.writablePasteboardTypes))
+        #expect(pasteboard.string(forType: .string) == "3.125")
+        // Restore the original field value before closing; this test never submits a note edit.
+        workspace.performUndo(); box.target = nil
+    }
+
     @Test func inspectorStringAndActiveStringUndoTogetherAndFineEntryDoesNotOverwriteNeighbor() throws {
         let workspace = Workspace(services: services()); defer { workspace.shutdown() }
         workspace.project = ScoreProject(duration: 20)

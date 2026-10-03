@@ -25,25 +25,28 @@ struct DraggableTabNote: View {
         let center = CGPoint(x: target.center.x + anchor.x - originalAnchor.x,
                              y: target.center.y + anchor.y - originalAnchor.y)
         let countWidth = target.events.count > 1 ? target.width / 2 : 0
+        let selectedCount = target.events.filter { workspace.selectedIDs.contains($0.id) }.count
         HStack(spacing: 0) {
             Text(shown.fret.map(String.init) ?? "?")
                 .font(.system(size: compact ? 12 : 14, weight: .semibold, design: .monospaced))
-                .foregroundStyle(workspace.selectedID == event.id || compact ? ink : (shown.fret == nil ? Palette.secondary : .white))
+                .foregroundStyle(workspace.selectedIDs.contains(event.id) || compact ? ink : (shown.fret == nil ? Palette.secondary : .white))
                 .frame(width: target.width - countWidth, height: target.height)
-                .background(workspace.selectedID == event.id ? Palette.mint : background, in: RoundedRectangle(cornerRadius: 4))
+                .background(workspace.selectedIDs.contains(event.id) ? Palette.mint.opacity(workspace.selectedID == event.id ? 1 : 0.55) : background, in: RoundedRectangle(cornerRadius: 4))
                 .overlay(RoundedRectangle(cornerRadius: 4).strokeBorder(workspace.positionMagnetTargetID == event.id ? Palette.mint : (shown.tentative ? tentative : .clear),
                                                                      style: StrokeStyle(lineWidth: 1, dash: [2, 2])))
             if countWidth > 0 {
-                Text("×\(target.events.count)").lineLimit(1).minimumScaleFactor(0.6).font(.system(size: compact ? 8 : 10, weight: .semibold))
+                Text(selectedCount > 0 ? "\(selectedCount)/\(target.events.count)" : "×\(target.events.count)").lineLimit(1).minimumScaleFactor(0.6).font(.system(size: compact ? 8 : 10, weight: .semibold))
                     .foregroundStyle(compact ? ink : Palette.mint)
                     .frame(width: countWidth, height: target.height)
-                    .background(background, in: RoundedRectangle(cornerRadius: 3))
+                    .background(selectedCount > 0 ? Palette.mint.opacity(0.4) : background, in: RoundedRectangle(cornerRadius: 3))
             }
         }
         .overlay(NotePointerSurface(chooserWidth: countWidth,
-            label: "\(String(shown.time))초 · \(shown.lane.title) · \(shown.string)번 줄 · \(shown.fret.map(String.init) ?? "?") · \(target.events.count)개 음",
+            label: "\(String(shown.time))초 · \(shown.lane.title) · \(shown.string)번 줄 · \(shown.fret.map(String.init) ?? "?") · \(target.events.count)개 음 · \(selectedCount)개 선택",
+            selected: workspace.selectedIDs.contains(event.id),
             actions: NotePointerControl.Actions(
                 click: { workspace.select(target.next(selectedID: workspace.selectedID)) },
+                toggle: { workspace.toggleSelection(target.events.first { !workspace.selectedIDs.contains($0.id) } ?? event) },
                 chooser: { choosing = true },
                 doubleClick: { workspace.select(event); workspace.focusSelectedForPosition() },
                 begin: { workspace.beginPositionDrag(event) },
@@ -55,7 +58,7 @@ struct DraggableTabNote: View {
             NoteCollisionChooser(workspace: workspace, events: target.events) { choosing = false }
         }
         .help(target.events.count > 1
-            ? "\(target.events.count)개 겹친 음 · 클릭: 다음 음 · ×개수: 목록 · 선택한 프렛을 드래그 · 선/점은 실제 시작 위치"
+            ? "\(target.events.count)개 겹친 음 · ⌘클릭: 선택 추가/해제 · 클릭: 다음 음 · ×개수: 목록 · 선택한 프렛을 드래그 · 선/점은 실제 시작 위치"
             : "\(clockLabel(shown.time)) · \(shown.string)번 줄 · Shift: 가까운 음에 마그넷 정렬 · Option: 정밀 이동 · 더블 클릭: 2초 확대")
     }
 
@@ -93,12 +96,14 @@ struct NoteCollisionChooser: View {
                                     if !event.memo.isEmpty { Text(event.memo).lineLimit(2) }
                                 }
                                 Spacer(minLength: 0)
-                                if workspace.selectedID == event.id { Image(systemName: "checkmark") }
+                                if workspace.selectedIDs.contains(event.id) { Image(systemName: workspace.selectedID == event.id ? "checkmark.circle.fill" : "checkmark") }
                         }.font(.system(size: 11, design: .monospaced)).padding(6)
                         .overlay(NotePointerSurface(chooserWidth: 0,
                             label: "음 \(index + 1) · \(String(event.time))초 · \(event.memo)",
+                            selected: workspace.selectedIDs.contains(event.id),
                             actions: NotePointerControl.Actions(
-                                click: { workspace.select(event); dismiss() }, chooser: {},
+                                click: { workspace.select(event); dismiss() },
+                                toggle: { workspace.toggleSelection(event) }, chooser: {},
                                 doubleClick: { workspace.select(event); dismiss() },
                                 begin: {}, update: { _, _, _ in }, end: {})))
                     }
@@ -141,7 +146,7 @@ struct PointerTabNotes: View {
                         context.stroke(leader, with: .color(tentative), lineWidth: 0.7)
                         for candidate in target.events {
                             let point = position(workspace.renderedEvent(candidate))
-                            context.fill(Path(CGRect(x: point.x - 0.7, y: point.y + target.height / 2, width: 1.4, height: 3)), with: .color(workspace.positionMagnetTargetID == candidate.id ? Palette.mint : tentative))
+                            context.fill(Path(CGRect(x: point.x - 0.7, y: point.y + target.height / 2, width: 1.4, height: 3)), with: .color(workspace.positionMagnetTargetID == candidate.id || workspace.selectedIDs.contains(candidate.id) ? Palette.mint : tentative))
                         }
                     }
                 }

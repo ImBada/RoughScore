@@ -230,6 +230,14 @@ struct ScoreStaff: View {
                                          at: CGPoint(x: min(left + width - 27, max(left + 27, guideX)), y: 7))
                         }
                     }
+                    if let range = workspace.selectionRange, workspace.selection.ids.contains(where: { id in events.contains { $0.id == id } }) {
+                        let start = max(row.start, range.start), end = min(row.end, range.end)
+                        if end > start {
+                            context.fill(Path(CGRect(x: left + row.fraction(at: start) * width, y: 31 + offset,
+                                width: (row.fraction(at: end) - row.fraction(at: start)) * width, height: 82)),
+                                with: .color(Paper.accent.opacity(0.13)))
+                        }
+                    }
                     if workspace.looping || dragRange != nil {
                         let start = max(row.start, dragRange?.start ?? workspace.loopStart)
                         let end = min(row.end, dragRange?.end ?? workspace.loopEnd)
@@ -325,6 +333,9 @@ struct ScoreStaff: View {
                     workspace.addEvent(time: time, string: string)
                 })
                 .accessibilityLabel("\(lane.title) · \(clockLabel(row.start))부터 \(clockLabel(row.end)) · 클릭 후 숫자로 프렛 입력, 파형 드래그로 반복 구간 설정")
+                TabRangeSurface(workspace: workspace, lane: lane) { x in
+                    row.time(at: min(1, max(0, (x - left) / width)))
+                }
                 PointerTabNotes(workspace: workspace, events: events, bounds: left...(left + max(1, width)),
                     position: { note in CGPoint(x: left + row.fraction(at: note.time) * width,
                                                  y: stringTop + Double((note.string - 1) * 14)) },

@@ -44,13 +44,13 @@ struct NotePointerTests {
         return workspace
     }
 
-    @MainActor private final class Host {
+    @MainActor final class Host {
         let view: NSHostingView<AnyView>
         let window: NSWindow
-        init(_ content: some View, height: Double = 290) {
+        init(_ content: some View, height: Double = 290, width: Double = 666) {
             _ = NSApplication.shared
             view = NSHostingView(rootView: AnyView(content))
-            view.frame = CGRect(x: 0, y: 0, width: 666, height: height)
+            view.frame = CGRect(x: 0, y: 0, width: width, height: height)
             window = NSWindow(contentRect: view.frame, styleMask: [.titled], backing: .buffered, defer: false)
             window.isReleasedWhenClosed = false; window.contentView = view
             settle()
@@ -60,9 +60,12 @@ struct NotePointerTests {
             view.layoutSubtreeIfNeeded()
         }
         func close() { window.contentView = nil; window.close() }
-        func controls() -> [NotePointerControl] {
+        func descendants() -> [NSView] {
             func walk(_ node: NSView) -> [NSView] { [node] + node.subviews.flatMap(walk) }
-            return walk(view).compactMap { $0 as? NotePointerControl }
+            return walk(view)
+        }
+        func controls() -> [NotePointerControl] {
+            return descendants().compactMap { $0 as? NotePointerControl }
         }
         func event(_ type: NSEvent.EventType, control: NotePointerControl, delta: CGSize = .zero,
                    flags: NSEvent.ModifierFlags = []) throws -> NSEvent {
@@ -72,14 +75,14 @@ struct NotePointerTests {
                 timestamp: 100, windowNumber: window.windowNumber, context: nil,
                 eventNumber: 1, clickCount: 1, pressure: 1))
         }
-        func click(_ control: NotePointerControl) throws {
-            let down = try event(.leftMouseDown, control: control)
+        func click(_ control: NotePointerControl, flags: NSEvent.ModifierFlags = []) throws {
+            let down = try event(.leftMouseDown, control: control, flags: flags)
             let parentPoint = view.superview!.convert(down.locationInWindow, from: nil)
             // NSView.hitTest takes the point in its superview's coordinate space.
             let correct = view.hitTest(parentPoint) === control
             #expect(correct)
             control.mouseDown(with: down)
-            control.mouseUp(with: try event(.leftMouseUp, control: control))
+            control.mouseUp(with: try event(.leftMouseUp, control: control, flags: flags))
             settle()
         }
     }

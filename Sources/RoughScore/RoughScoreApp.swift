@@ -33,6 +33,10 @@ struct RoughScoreApp: App {
                 Button("실행 취소") { workspace.performUndo() }.keyboardShortcut("z").disabled(!workspace.canPerformUndo)
                 Button("다시 실행") { workspace.performRedo() }.keyboardShortcut("z", modifiers: [.command, .shift]).disabled(!workspace.canPerformRedo)
             }
+            CommandGroup(after: .pasteboard) {
+                Button("선택을 커서에 복제") { _ = workspace.duplicateSelection() }
+                    .keyboardShortcut("d").disabled(!workspace.canUseTabClipboard || !workspace.canEditSelection)
+            }
             CommandGroup(replacing: .newItem) {
                 Button("오디오 열기…") { workspace.importAudio() }.keyboardShortcut("o")
                     .disabled(workspace.busy || workspace.analyzing)

@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import RoughScoreCore
 
 /// TAB selection owns keyboard focus; ordinary text fields keep their native typing behavior.
 struct TabKeyboardBridge: NSViewRepresentable {
@@ -19,13 +20,38 @@ struct TabKeyboardBridge: NSViewRepresentable {
 @MainActor
 final class TabKeyboardView: NSView {
     weak var workspace: Workspace?
+    // Tests use a unique named pasteboard; production uses the normal clipboard.
+    var pasteboard = NSPasteboard.general
+    @objc func copy(_ sender: Any?) { _ = workspace?.copySelection(to: pasteboard) }
+    @objc func paste(_ sender: Any?) { _ = workspace?.pasteSelection(from: pasteboard) }
+    @objc func cut(_ sender: Any?) {
+        guard workspace?.copySelection(to: pasteboard) == true else { return }
+        workspace?.deleteSelected()
+    }
+    override func selectAll(_ sender: Any?) { workspace?.selectAllInLane() }
+    @objc func duplicate(_ sender: Any?) { _ = workspace?.duplicateSelection() }
     override var acceptsFirstResponder: Bool { true }
     override func flagsChanged(with event: NSEvent) {
         workspace?.updatePositionModifiers(shift: event.modifierFlags.contains(.shift))
         super.flagsChanged(with: event)
     }
     override func keyDown(with event: NSEvent) {
-        guard let workspace, !event.modifierFlags.contains(.command), !event.modifierFlags.contains(.control) else {
+        guard let workspace else { super.keyDown(with: event); return }
+        if event.modifierFlags.contains(.command), !event.modifierFlags.contains(.control),
+           !event.modifierFlags.contains(.option) {
+            switch event.charactersIgnoringModifiers?.lowercased() {
+            case "c": copy(nil)
+            case "v": paste(nil)
+            case "x": cut(nil)
+            case "a": selectAll(nil)
+            case "d": duplicate(nil)
+            case "z":
+                if event.modifierFlags.contains(.shift) { workspace.performRedo() } else { workspace.performUndo() }
+            default: super.keyDown(with: event)
+            }
+            return
+        }
+        guard !event.modifierFlags.contains(.control) else {
             super.keyDown(with: event); return
         }
         guard workspace.canEdit else {

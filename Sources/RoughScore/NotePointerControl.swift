@@ -8,6 +8,7 @@ import SwiftUI
 final class NotePointerControl: NSView {
     struct Actions {
         var click: () -> Void
+        var toggle: (() -> Void)? = nil
         var chooser: () -> Void
         var doubleClick: () -> Void
         var begin: () -> Void
@@ -23,6 +24,7 @@ final class NotePointerControl: NSView {
     private var precise = false
     private var inChooser = false
     private var clicks = 1
+    private var adding = false
     override var isFlipped: Bool { true }
     override var acceptsFirstResponder: Bool { false }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
@@ -32,12 +34,13 @@ final class NotePointerControl: NSView {
         let origin = convert(CGPoint.zero, to: nil)
         axes = CGSize(width: convert(CGPoint(x: 1, y: 0), to: nil).x - origin.x,
                       height: convert(CGPoint(x: 0, y: 1), to: nil).y - origin.y)
+        adding = event.modifierFlags.contains(.command)
         dragging = false; precise = event.modifierFlags.contains(.option); clicks = event.clickCount
         let local = convert(event.locationInWindow, from: nil)
         inChooser = chooserWidth > 0 && local.x >= bounds.width - chooserWidth
     }
     override func mouseDragged(with event: NSEvent) {
-        guard let active, !inChooser else { return }
+        guard let active, !inChooser, !adding else { return }
         let point = event.locationInWindow
         guard abs(axes.width) > 0.001, abs(axes.height) > 0.001 else { return }
         let delta = CGSize(width: (point.x - start.x) / axes.width, height: (point.y - start.y) / axes.height)
@@ -50,6 +53,7 @@ final class NotePointerControl: NSView {
         guard let active else { return }
         if dragging { mouseDragged(with: event); active.end() }
         else if inChooser { active.chooser() }
+        else if adding { active.toggle?() }
         else if clicks == 2 { active.doubleClick() }
         else { active.click() }
         self.active = nil; dragging = false
@@ -62,10 +66,20 @@ final class NotePointerControl: NSView {
 struct NotePointerSurface: NSViewRepresentable {
     let chooserWidth: Double
     let label: String
+    var selected = false
     let actions: NotePointerControl.Actions
     func makeNSView(context: Context) -> NotePointerControl { NotePointerControl() }
     func updateNSView(_ view: NotePointerControl, context: Context) {
         view.actions = actions; view.chooserWidth = chooserWidth
         view.setAccessibilityElement(true); view.setAccessibilityRole(.button); view.setAccessibilityLabel(label)
+        view.setAccessibilityValue(selected ? "선택됨" : "선택 안 됨")
+        view.setAccessibilityCustomActions([
+            NSAccessibilityCustomAction(name: "선택 추가 또는 해제") { [weak view] in
+                guard let toggle = view?.actions?.toggle else { return false }; toggle(); return true
+            },
+            NSAccessibilityCustomAction(name: "겹친 음 목록") { [weak view] in
+                guard let view, view.chooserWidth > 0 else { return false }; view.actions?.chooser(); return true
+            }
+        ])
     }
 }
