@@ -6,13 +6,25 @@ import UniformTypeIdentifiers
 
 @MainActor
 final class Workspace: ObservableObject {
-    @Published var project = ScoreProject.demo
+    @Published var project = ScoreProject.demo { didSet { pruneSelection() } }
     @Published var prepared: PreparedAudio?
     @Published private(set) var audioConnection = "오디오 준비 전"
     @Published var source: ListeningSource = .stereo
     @Published var lane: GuitarLane = .left
     @Published var activeString = 6
     @Published var selectedID: UUID?
+    @Published private(set) var selection = try! TabSelection()
+    @Published private(set) var selectionRange: TimeSpan?
+    var selectedIDs: Set<UUID> {
+        selection.ids.union(selectedID.map { [$0] } ?? [])
+    }
+    var editSelection: TabSelection {
+        try! TabSelection(ids: selectedIDs, primaryID: selectedID ?? selection.primaryID)
+    }
+    var canEditSelection: Bool { canMutateNotes && !selectedIDs.isEmpty }
+    var canUseTabClipboard: Bool { canMutateNotes && services.nativeTextUndo() == nil }
+    private var dragSelection: TabSelection?
+    private var dragEvents: [TabEvent]?
     @Published var cursor = 2.0
     @Published private(set) var entryInterval = 0.05
     @Published var windowStart = 0.0
@@ -68,6 +80,9 @@ final class Workspace: ObservableObject {
         let id = UUID()
         let events: [TabEvent]
         let selectedID: UUID?
+        let selection: TabSelection
+        let selectionRange: TimeSpan?
+        let cursor: Double?
         let activeString: Int
     }
     private var undoHistory: [EditSnapshot] = []
@@ -224,7 +239,7 @@ final class Workspace: ObservableObject {
     func seekForEditing(_ time: Double, lane: GuitarLane? = nil) {
         guard canMutateNotes, let bounded = TimeBounds.clamp(time, duration: project.duration) else { return }
         endMemoEditing()
-        fretEntry.reset(); newlyCreatedID = nil; selectedID = nil
+        fretEntry.reset(); newlyCreatedID = nil; resetSelection()
         if let lane { selectLane(lane) }
         jumpToScoreTime(bounded); requestKeyboardFocus?()
         status = "\(clockLabel(cursor)) · \(activeString)번 줄에 숫자로 입력 · 파형 드래그로 반복"
@@ -503,7 +518,7 @@ final class Workspace: ObservableObject {
         }
         recordUndo()
         let event = TabEvent(time: actual, lane: lane, string: string)
-        project.events.append(event); selectedID = event.id; dirty = true; jumpToScoreTime(actual)
+        project.events.append(event); setSelection(try! TabSelection(ids: [event.id], primaryID: event.id)); dirty = true; jumpToScoreTime(actual)
         fretEntry.reset(); newlyCreatedID = event.id
         requestKeyboardFocus?(); changed()
         status = "숫자를 입력하세요 · 10–24는 이어서 입력 · Delete 삭제 / ⌘Z 취소"
@@ -513,9 +528,117 @@ final class Workspace: ObservableObject {
         guard canMutateNotes, let actual = project.events.first(where: { $0.id == event.id }) else { return }
         endMemoEditing()
         fretEntry.reset(); newlyCreatedID = nil
-        selectedID = actual.id; activeString = actual.string; selectLane(actual.lane); jumpToScoreTime(actual.time)
+        setSelection(try! TabSelection(ids: [actual.id], primaryID: actual.id)); activeString = actual.string; selectLane(actual.lane); jumpToScoreTime(actual.time)
         requestKeyboardFocus?()
         status = "숫자로 프렛 변경 · ↑↓ 줄 이동 · ←→ 위치 이동 · Tab 다음 음"
+    }
+
+    private func resetSelection() {
+        selectedID = nil; selection = try! TabSelection(); selectionRange = nil
+    }
+    private func setSelection(_ value: TabSelection, range: TimeSpan? = nil) {
+        selection = value; selectedID = value.primaryID; selectionRange = range
+    }
+    private func pruneSelection() {
+        let available = Set(project.events.map(\.id))
+        let ids = selection.ids.intersection(available)
+        if let active = selectedID, !available.contains(active) { selectedID = nil }
+        if ids != selection.ids {
+            selection = try! TabSelection(ids: ids, primaryID: selectedID.flatMap { ids.contains($0) ? $0 : nil })
+            selectionRange = nil
+        }
+    }
+    func toggleSelection(_ event: TabEvent) {
+        guard canMutateNotes, project.events.contains(where: { $0.id == event.id }) else { return }
+        endMemoEditing(); finishEntry()
+        var ids = selectedIDs
+        if ids.contains(event.id) { ids.remove(event.id) } else { ids.insert(event.id) }
+        setSelection(try! TabSelection(ids: ids, primaryID: ids.contains(event.id) ? event.id : nil))
+        if let selected { activeString = selected.string; lane = selected.lane }
+        requestKeyboardFocus?(); status = "\(ids.count)개 선택 · ⌘클릭 추가/해제 · ⌘드래그 구간 선택"
+    }
+    func selectAllInLane() {
+        guard canMutateNotes else { return }
+        endMemoEditing(); finishEntry()
+        let ids = Set(project.events.filter { $0.lane == lane }.map(\.id))
+        setSelection(try! TabSelection(ids: ids, primaryID: selectedID.flatMap { ids.contains($0) ? $0 : nil }))
+        requestKeyboardFocus?()
+    }
+    @discardableResult
+    func selectRange(lane: GuitarLane, from start: Double, to end: Double) -> Bool {
+        guard canMutateNotes, start.isFinite, end.isFinite else { return false }
+        do {
+            let value = try TabSelection.range(in: project, lane: lane, from: min(start, end), to: max(start, end))
+            endMemoEditing(); finishEntry(); self.lane = lane
+            setSelection(value, range: TimeSpan(start: min(start, end), end: max(start, end)))
+            if let selected { activeString = selected.string }
+            requestKeyboardFocus?(); status = "\(value.ids.count)개 구간 선택 · 시작 포함 / 끝 제외 · ⌘클릭으로 붙여넣기 위치"
+            return true
+        } catch { status = "구간 선택 실패 · \(error)"; return false }
+    }
+    func placeSelectionCursor(_ time: Double) {
+        guard canMutateNotes else { return }
+        finishEntry(); endMemoEditing(); jumpToScoreTime(time); requestKeyboardFocus?()
+        status = "붙여넣기 위치 \(clockLabel(cursor)) · 선택 \(selectedIDs.count)개 유지 · ⌘D 복제"
+    }
+    @discardableResult
+    func applyBatch(_ command: TabEditCommand) -> Bool {
+        guard canMutateNotes else { return false }
+        do {
+            let result = try command.apply(to: project)
+            guard result.changed else { return false }
+            recordUndo(preservingCursor: true); finishEntry()
+            project = result.project
+            if let pasted = result.pastedSelection { setSelection(pasted) }
+            else if case .move = command {
+                // After position changes copy starts at the group's current earliest onset.
+                setSelection(try! TabSelection(ids: selectedIDs, primaryID: selectedID))
+            }
+            if let selected { activeString = selected.string; lane = selected.lane }
+            changed(); requestKeyboardFocus?(); status = "선택 일괄 편집 · ⌘Z 한 번으로 전체 취소"
+            return true
+        } catch { status = "선택 편집 거절 · 전체 유지 · \(error)"; return false }
+    }
+    @discardableResult
+    func offsetSelection(time: Double, strings: Int = 0, targetLane: GuitarLane? = nil) -> Bool {
+        applyBatch(.move(selection: editSelection, timeDelta: time, stringDelta: strings, targetLane: targetLane))
+    }
+    @discardableResult
+    func setSelectionLength(_ length: NoteLength?) -> Bool {
+        applyBatch(.setLength(selection: editSelection, length: length))
+    }
+    @discardableResult
+    func setSelectionTentative(_ value: Bool) -> Bool {
+        applyBatch(.setTentative(selection: editSelection, value: value))
+    }
+    func selectedFragment() throws -> TabFragment {
+        // Preserve leading silence until an edit or explicit UUID toggle changes the range.
+        let snapshot = selectionRange == nil ? editSelection : selection
+        let copied = try TabFragment.copy(from: project, selection: snapshot)
+        let primary = project.events.filter { snapshot.ids.contains($0.id) }.firstIndex { $0.id == selectedID }
+        return try TabFragment(events: copied.events, primaryIndex: primary ?? copied.primaryIndex)
+    }
+    @discardableResult
+    func duplicateSelection(targetLane: GuitarLane? = nil) -> Bool {
+        guard canMutateNotes, !selectedIDs.isEmpty else { return false }
+        do { return applyBatch(.paste(fragment: try selectedFragment(), at: cursor, targetLane: targetLane)) }
+        catch { status = "복제 거절 · 전체 유지 · \(error)"; return false }
+    }
+    @discardableResult
+    func copySelection(to pasteboard: NSPasteboard = .general) -> Bool {
+        guard canUseTabClipboard, !selectedIDs.isEmpty else { return false }
+        do {
+            let data = try selectedFragment().encoded()
+            pasteboard.clearContents()
+            return pasteboard.setData(data, forType: NSPasteboard.PasteboardType(TabFragment.pasteboardType))
+        } catch { status = "복사 거절 · \(error)"; return false }
+    }
+    @discardableResult
+    func pasteSelection(from pasteboard: NSPasteboard = .general, targetLane: GuitarLane? = nil) -> Bool {
+        guard canUseTabClipboard,
+              let data = pasteboard.data(forType: NSPasteboard.PasteboardType(TabFragment.pasteboardType)) else { return false }
+        do { return applyBatch(.paste(fragment: try TabFragment.decode(data), at: cursor, targetLane: targetLane)) }
+        catch { status = "붙여넣기 거절 · 전체 유지 · \(error)"; return false }
     }
 
     func inputDigit(_ digit: Int, at time: Double = ProcessInfo.processInfo.systemUptime) {
@@ -564,14 +687,23 @@ final class Workspace: ObservableObject {
     }
 
     func renderedEvent(_ event: TabEvent) -> TabEvent {
-        positionDrag?.id == event.id ? positionDrag! : event
+        guard let preview = positionDrag, let originals = dragEvents,
+              let original = originals.first(where: { $0.id == preview.id }),
+              originals.contains(where: { $0.id == event.id }) else { return event }
+        var shown = event
+        shown.time = event.time + (preview.time - original.time)
+        shown.string = event.string + (preview.string - original.string)
+        return shown
     }
     func beginPositionDrag(_ event: TabEvent) {
         guard canMutateNotes else { return }
         endMemoEditing()
         guard !busy, let actual = project.events.first(where: { $0.id == event.id }) else { return }
         fretEntry.reset(); newlyCreatedID = nil
+        if !selectedIDs.contains(actual.id) { setSelection(try! TabSelection(ids: [actual.id])) }
         selectedID = actual.id; lane = actual.lane; activeString = actual.string
+        dragSelection = editSelection
+        dragEvents = project.events.filter { selectedIDs.contains($0.id) }
         positionDrag = actual
         positionMagnetTargetID = nil; magnetDragInput = nil
         requestKeyboardFocus?()
@@ -584,6 +716,13 @@ final class Workspace: ObservableObject {
         guard let bounded = TimeBounds.clamp(snapped, duration: project.duration) else { return }
         preview.time = bounded
         preview.string = min(6, max(1, string))
+        if let originals = dragEvents, originals.count > 1,
+           let original = originals.first(where: { $0.id == preview.id }), let dragSelection {
+            guard (try? TabEditCommand.move(selection: dragSelection, timeDelta: preview.time - original.time,
+                                           stringDelta: preview.string - original.string).apply(to: project)) != nil else {
+                status = "선택 전체의 경계를 벗어나 이동할 수 없습니다"; return
+            }
+        }
         positionDrag = preview
         status = "\(String(format: "%.3f", preview.time))초 · \(preview.string)번 줄 · 놓으면 이동 / Esc 취소"
     }
@@ -592,7 +731,7 @@ final class Workspace: ObservableObject {
         guard canEdit else { return }
         guard time.isFinite, let dragged = positionDrag else { return }
         let candidates = anchors.compactMap { anchor -> NoteMagnetAnchor? in
-            guard anchor.id != dragged.id,
+            guard !selectedIDs.contains(anchor.id),
                   let actual = project.events.first(where: { $0.id == anchor.id && $0.lane == dragged.lane }) else { return nil }
             return NoteMagnetAnchor(id: actual.id, time: actual.time, x: anchor.x)
         }
@@ -607,34 +746,27 @@ final class Workspace: ObservableObject {
         let anchor = shift ? NoteTimeMagnet.nearest(to: input.screenX, anchors: input.anchors) : nil
         // Dragging stays free; Shift alone requests alignment with another note.
         previewPositionDrag(time: anchor?.time ?? input.time, string: input.string, snap: false)
-        magnetDragInput = input; positionMagnetTargetID = anchor?.id
-        if let anchor {
+        magnetDragInput = input; positionMagnetTargetID = positionDrag?.time == anchor?.time ? anchor?.id : nil
+        if let anchor, positionMagnetTargetID == anchor.id {
             status = "Shift 마그넷 · \(String(format: "%.3f", anchor.time))초에 붙음 · Shift를 놓으면 자유 이동"
         }
     }
     func commitPositionDrag() {
         guard canEdit else { return }
-        guard let preview = positionDrag, let index = project.events.firstIndex(where: { $0.id == preview.id }) else {
-            positionDrag = nil; positionMagnetTargetID = nil; magnetDragInput = nil; return
-        }
+        let preview = positionDrag
+        let original = dragEvents?.first { $0.id == preview?.id }
+        let batch = dragSelection
         positionDrag = nil; positionMagnetTargetID = nil; magnetDragInput = nil
-        guard project.events[index].time != preview.time || project.events[index].string != preview.string else {
-            status = "\(String(format: "%.3f", preview.time))초 · 숫자를 끌어서 위치 이동"
-            return
-        }
-        var candidate = project
-        candidate.events[index].time = preview.time
-        candidate.events[index].string = preview.string
-        guard (try? candidate.validated()) != nil else { return }
-        recordUndo()
-        project = candidate
-        activeString = preview.string
-        changed(); requestKeyboardFocus?()
-        status = "\(String(format: "%.3f", preview.time))초로 이동 · ⌘Z 취소 · Shift+Space로 듣기"
+        dragSelection = nil; dragEvents = nil
+        guard let preview, let original, let batch else { return }
+        _ = applyBatch(.move(selection: batch, timeDelta: preview.time - original.time,
+                            stringDelta: preview.string - original.string))
     }
+
     func cancelPositionDrag() {
         guard canEdit else { return }
         positionDrag = nil; positionMagnetTargetID = nil; magnetDragInput = nil
+        dragSelection = nil; dragEvents = nil
         status = "이동 취소 · 선택 유지 · Esc를 다시 누르면 선택 해제"
         requestKeyboardFocus?()
     }
@@ -670,12 +802,7 @@ final class Workspace: ObservableObject {
         if !playing { togglePlayback() }
     }
     func deleteSelected() {
-        guard canMutateNotes else { return }
-        guard selected != nil else { return }
-        recordUndo()
-        project.events.removeAll { $0.id == selectedID }; selectedID = nil
-        fretEntry.reset(); newlyCreatedID = nil; changed()
-        requestKeyboardFocus?(); status = "메모 삭제 · ⌘Z로 되돌리기"
+        _ = applyBatch(.delete(selection: editSelection))
     }
 
     func moveSelectedString(by delta: Int) {
@@ -684,6 +811,9 @@ final class Workspace: ObservableObject {
             activeString = min(6, max(1, activeString + delta))
             status = "편집 줄 \(activeString)번 · 숫자를 입력하면 현재 위치에 기록"
             return
+        }
+        if selectedIDs.count > 1 {
+            _ = offsetSelection(time: 0, strings: delta); return
         }
         let string = min(6, max(1, selected.string + delta))
         guard string != selected.string else { return }
@@ -697,6 +827,9 @@ final class Workspace: ObservableObject {
         guard let selected else {
             if let time = TimeBounds.clamp(cursor + delta, duration: project.duration) { seekForEditing(time) }
             return
+        }
+        if selectedIDs.count > 1 {
+            _ = offsetSelection(time: delta); revealSelectedPosition(); return
         }
         guard let time = TimeBounds.clamp(selected.time + delta, duration: project.duration) else { return }
         guard time != selected.time else { return }
@@ -720,15 +853,18 @@ final class Workspace: ObservableObject {
         guard canMutateNotes else { return }
         if selectedID == nil {
             addEvent(time: cursor, string: activeString, matchingExisting: false)
-            finishEntry(); selectedID = nil // The next explicit arrow starts another sparse note.
+            finishEntry(); resetSelection() // The next explicit arrow starts another sparse note.
         } else { updateSelected { $0.fret = nil } }
     }
-    func toggleTentative() { updateSelected { $0.tentative.toggle() } }
+    func toggleTentative() {
+        guard let selected else { return }
+        _ = setSelectionTentative(!selected.tentative)
+    }
     func finishEntry() { guard canMutateNotes else { return }; fretEntry.reset(); newlyCreatedID = nil }
     func clearSelection() {
         guard canEdit else { return }
         if positionDrag != nil { cancelPositionDrag(); return }
-        finishEntry(); selectedID = nil; requestKeyboardFocus?()
+        finishEntry(); resetSelection(); requestKeyboardFocus?()
         status = "선택 해제 · 현재 위치에서 숫자로 입력"
     }
 
@@ -769,9 +905,9 @@ final class Workspace: ObservableObject {
     }
 
     @discardableResult
-    private func recordUndo(coalescingMemo: Bool = false) -> UUID {
+    private func recordUndo(coalescingMemo: Bool = false, preservingCursor: Bool = false) -> UUID {
         if !coalescingMemo { endMemoEditing() }
-        let snapshot = EditSnapshot(events: project.events, selectedID: selectedID, activeString: activeString)
+        let snapshot = EditSnapshot(events: project.events, selectedID: selectedID, selection: selection, selectionRange: selectionRange, cursor: preservingCursor ? cursor : nil, activeString: activeString)
         undoHistory.append(snapshot)
         if undoHistory.count > 100 { undoHistory.removeFirst() }
         redoHistory.removeAll()
@@ -782,21 +918,27 @@ final class Workspace: ObservableObject {
         if positionDrag != nil { cancelPositionDrag(); return }
         endMemoEditing()
         guard let snapshot = undoHistory.popLast() else { return }
-        redoHistory.append(EditSnapshot(events: project.events, selectedID: selectedID, activeString: activeString))
+        redoHistory.append(EditSnapshot(events: project.events, selectedID: selectedID, selection: selection, selectionRange: selectionRange, cursor: snapshot.cursor == nil ? nil : cursor, activeString: activeString))
         restore(snapshot); status = "입력 취소 · ⇧⌘Z로 다시 실행"
     }
     func redoEdit() {
         guard canMutateNotes else { return }
         endMemoEditing()
         guard let snapshot = redoHistory.popLast() else { return }
-        undoHistory.append(EditSnapshot(events: project.events, selectedID: selectedID, activeString: activeString))
+        undoHistory.append(EditSnapshot(events: project.events, selectedID: selectedID, selection: selection, selectionRange: selectionRange, cursor: snapshot.cursor == nil ? nil : cursor, activeString: activeString))
         restore(snapshot); status = "입력 다시 실행"
     }
     private func restore(_ snapshot: EditSnapshot) {
         positionDrag = nil; positionMagnetTargetID = nil; magnetDragInput = nil
-        project.events = snapshot.events; selectedID = snapshot.selectedID; activeString = snapshot.activeString
+        dragSelection = nil; dragEvents = nil
+        project.events = snapshot.events
+        selection = snapshot.selection; selectionRange = snapshot.selectionRange
+        selectedID = snapshot.selectedID; activeString = snapshot.activeString
+        pruneSelection()
         fretEntry.reset(); newlyCreatedID = nil
-        if let selected { lane = selected.lane; jumpToScoreTime(selected.time) }
+        if let selected { lane = selected.lane }
+        if let cursor = snapshot.cursor { jumpToScoreTime(cursor) }
+        else if let selected { jumpToScoreTime(selected.time) }
         changed(); requestKeyboardFocus?()
     }
     private func changed() {
@@ -1085,8 +1227,9 @@ final class Workspace: ObservableObject {
         audioConnection = staged.offlineReason.map { "오프라인 · " + $0 } ??
             (staged.audio?.isMono == true ? "모노 연결됨 · L/R 동일" : "스테레오 연결됨 · 원본 L/R")
         projectIdentity = UUID(); projectURL = staged.projectURL; isDemo = staged.isDemo
-        selectedID = nil; cursor = staged.isDemo ? 2 : 0; windowStart = 0
+        resetSelection(); cursor = staged.isDemo ? 2 : 0; windowStart = 0
         positionDrag = nil; positionMagnetTargetID = nil; magnetDragInput = nil
+        dragSelection = nil; dragEvents = nil
         memoSession = nil
         undoHistory.removeAll(); redoHistory.removeAll(); fretEntry.reset(); newlyCreatedID = nil
         inspectorVisible = false; scorePage = 0; followScore = true
