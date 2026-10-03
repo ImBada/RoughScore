@@ -45,6 +45,7 @@ public enum PortableProjectPackage {
     }
     struct Hooks {
         var checkpoint: (Checkpoint) throws -> Void = { _ in }
+        var readDirectory: (UnsafeMutablePointer<DIR>) -> UnsafeMutablePointer<dirent>? = { readdir($0) }
     }
 
     /// Collect all declared media or fail; missing/offline media is never silently omitted.
@@ -126,7 +127,7 @@ public enum PortableProjectPackage {
         try jsonFile.handle.write(contentsOf: json)
         try jsonFile.handle.synchronize()
         try hooks.checkpoint(.validating)
-        let validated = try read(at: stageURL, cancellation: cancellation)
+        let validated = try read(at: stageURL, cancellation: cancellation, hooks: hooks)
         guard validated.project == candidate else { throw PackageError.invalidPackage }
         guard fsync(stage.fd) == 0 else { throw posixError() }
         try hooks.checkpoint(.committing)
@@ -142,6 +143,10 @@ public enum PortableProjectPackage {
     }
 
     public static func read(at root: URL, cancellation: () throws -> Void = {}) throws -> Snapshot {
+        try read(at: root, cancellation: cancellation, hooks: Hooks())
+    }
+
+    static func read(at root: URL, cancellation: () throws -> Void = {}, hooks: Hooks) throws -> Snapshot {
         try check(cancellation)
         guard root.isFileURL else { throw PackageError.unsafePath }
         let canonical = root.standardizedFileURL
@@ -170,7 +175,7 @@ public enum PortableProjectPackage {
             verifiedFiles.append((asset.reference.path, file))
         }
         // Strict contract: no undeclared files, directories, device nodes, or symlinks (even unused ones).
-        try directory.validateTree(expected: expected, cancellation: cancellation)
+        try directory.validateTree(expected: expected, cancellation: cancellation, hooks: hooks)
         for (path, file) in verifiedFiles {
             guard file.unchanged, sameFile(try directory.file(path).info, file.info) else { throw PackageError.sourceChanged }
         }
@@ -257,13 +262,18 @@ public enum PortableProjectPackage {
             guard descriptor >= 0 else { throw PackageError.invalidResource }
             return try File(fd: descriptor)
         }
-        func validateTree(expected: Set<String>, cancellation: () throws -> Void) throws {
+        func validateTree(expected: Set<String>, cancellation: () throws -> Void, hooks: Hooks) throws {
             var seen = Set<String>()
             func visit(_ descriptor: Int32, _ prefix: String) throws {
                 guard let stream = fdopendir(dup(descriptor)) else { throw posixError() }
                 defer { closedir(stream) }
-                while let entry = readdir(stream) {
+                while true {
                     try check(cancellation)
+                    errno = 0
+                    guard let entry = hooks.readDirectory(stream) else {
+                        guard errno == 0 else { throw posixError() }
+                        break
+                    }
                     let name = withUnsafePointer(to: &entry.pointee.d_name) {
                         $0.withMemoryRebound(to: CChar.self, capacity: Int(MAXNAMLEN) + 1) { String(cString: $0) }
                     }

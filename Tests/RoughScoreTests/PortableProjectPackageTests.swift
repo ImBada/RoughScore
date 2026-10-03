@@ -350,4 +350,27 @@ struct PortableProjectPackageTests {
         #expect(try PortableProjectPackage.read(at: snapshot.root).project == snapshot.project)
     }
 
+
+    @Test func enumerationIOFailureAfterExpectedEntriesFailsReaderAndWriterClosed() throws {
+        let f = try Fixture(); let project = ScoreProject()
+        let snapshot = try PortableProjectPackage.collect(project, to: f.url("valid.roughscorepkg"))
+        let before = try f.hash(snapshot.root.appendingPathComponent("project.json"))
+        var reachedEnd = false
+        let hooks = PortableProjectPackage.Hooks(readDirectory: { stream in
+            let entry = readdir(stream)
+            if entry == nil { reachedEnd = true; errno = EIO }
+            return entry
+        })
+        #expect(throws: (any Error).self) { try PortableProjectPackage.read(at: snapshot.root, hooks: hooks) }
+        #expect(reachedEnd)
+        reachedEnd = false
+        #expect(throws: (any Error).self) {
+            try PortableProjectPackage.collect(project, to: f.url("failed.roughscorepkg"), hooks: hooks)
+        }
+        #expect(reachedEnd)
+        #expect(try f.children() == ["valid.roughscorepkg"])
+        #expect(try f.hash(snapshot.root.appendingPathComponent("project.json")) == before)
+        #expect(try PortableProjectPackage.read(at: snapshot.root).project == project)
+    }
+
 }
