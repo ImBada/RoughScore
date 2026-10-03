@@ -6,13 +6,27 @@ import UniformTypeIdentifiers
 
 @MainActor
 final class Workspace: ObservableObject {
-    @Published var project = ScoreProject.demo { didSet { pruneSelection() } }
-    @Published var prepared: PreparedAudio?
+    @Published var project = ScoreProject.demo {
+        didSet {
+            if oldValue.tuning != project.tuning || oldValue.tuningDefinition != project.tuningDefinition ||
+                oldValue.duration != project.duration || oldValue.events.first(where: { $0.id == selectedID }) != selected {
+                clearPitchDetection()
+            }
+            pruneSelection()
+        }
+    }
+    @Published var prepared: PreparedAudio? {
+        didSet {
+            if oldValue?.directory != prepared?.directory || oldValue?.left != prepared?.left || oldValue?.right != prepared?.right {
+                clearPitchDetection()
+            }
+        }
+    }
     @Published private(set) var audioConnection = "오디오 준비 전"
-    @Published var source: ListeningSource = .stereo
-    @Published var lane: GuitarLane = .left
+    @Published var source: ListeningSource = .stereo { didSet { if source != oldValue { clearPitchDetection() } } }
+    @Published var lane: GuitarLane = .left { didSet { if lane != oldValue { clearPitchDetection() } } }
     @Published var activeString = 6
-    @Published var selectedID: UUID?
+    @Published var selectedID: UUID? { didSet { if selectedID != oldValue { clearPitchDetection() } } }
     @Published private(set) var selection = try! TabSelection()
     @Published private(set) var selectionRange: TimeSpan?
     var selectedIDs: Set<UUID> {
@@ -25,7 +39,7 @@ final class Workspace: ObservableObject {
     var canUseTabClipboard: Bool { canMutateNotes && services.nativeTextUndo() == nil }
     private var dragSelection: TabSelection?
     private var dragEvents: [TabEvent]?
-    @Published var cursor = 2.0
+    @Published var cursor = 2.0 { didSet { if cursor != oldValue { clearPitchDetection() } } }
     @Published private(set) var entryInterval = 0.05
     @Published var windowStart = 0.0
     @Published var windowLength = 12.0
@@ -71,6 +85,27 @@ final class Workspace: ObservableObject {
     @Published private(set) var pitchDetectionMessage = ""
     private var pitchTask: Task<Void, Never>?
     private var pitchRequestID: UUID?
+    private struct SelectedPitchContext: Equatable {
+        let projectID: UUID
+        let event: TabEvent
+        let directory: URL
+        let audioURL: URL
+        let source: ListeningSource
+        let lane: GuitarLane
+        let cursor: Double
+        let duration: Double
+        let tuning: [String]
+        let tuningDefinition: TuningDefinition?
+    }
+    private var selectedPitchContext: SelectedPitchContext? {
+        guard let event = selected, let audio = prepared else { return nil }
+        return SelectedPitchContext(projectID: projectIdentity, event: event, directory: audio.directory,
+            audioURL: event.lane == .left ? audio.left : audio.right, source: source, lane: lane, cursor: cursor,
+            duration: project.duration, tuning: project.tuning, tuningDefinition: project.tuningDefinition)
+    }
+    private func ownsPitchRequest(_ id: UUID, context: SelectedPitchContext) -> Bool {
+        !closed && !Task.isCancelled && pitchRequestID == id && selectedPitchContext == context
+    }
     private struct MagnetDragInput {
         let time: Double
         let string: Int
@@ -216,23 +251,19 @@ final class Workspace: ObservableObject {
     /// Optional clean-monophonic estimate on the selected lane's prepared PCM; never edits TAB.
     @discardableResult
     func detectSelectedPitch() -> Task<Void, Never>? {
-        guard canMutateNotes, let event = selected, let audio = prepared else { return nil }
+        guard canMutateNotes, let context = selectedPitchContext else { return nil }
         clearPitchDetection()
-        let id = UUID(), identity = projectIdentity
+        let id = UUID()
         pitchRequestID = id; detectingPitch = true
-        let url = event.lane == .left ? audio.left : audio.right
         let task = Task {
             defer { if pitchRequestID == id { detectingPitch = false; pitchTask = nil } }
             do {
-                let result = try await services.detectPitch(url, event.time)
-                try Task.checkCancellation()
-                guard !closed, pitchRequestID == id, identity == projectIdentity,
-                      selected == event, prepared?.directory == audio.directory else { return }
+                let result = try await services.detectPitch(context.audioURL, context.event.time)
+                guard ownsPitchRequest(id, context: context) else { return }
                 detectedPitch = result
                 pitchDetectionMessage = result == nil ? "안정된 단음 음고 없음 · 직접 입력 가능" : "단음 추정 · 반음 반올림 · 운지는 직접 선택"
             } catch {
-                guard !closed, pitchRequestID == id, identity == projectIdentity,
-                      selected == event, prepared?.directory == audio.directory else { return }
+                guard ownsPitchRequest(id, context: context) else { return }
                 pitchDetectionMessage = "음고 추정 불가 · 직접 MIDI 입력 가능"
             }
         }

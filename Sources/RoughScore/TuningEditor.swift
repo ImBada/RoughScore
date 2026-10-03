@@ -23,6 +23,12 @@ struct TuningEditor: View {
     @State private var pitches = Array(repeating: "", count: 6)
     @State private var capo = "0"
     @State private var message = ""
+    private var validatedDraft: TuningDefinition? {
+        let values = pitches.compactMap { Int($0.trimmingCharacters(in: .whitespacesAndNewlines)) }
+        guard values.count == 6, let capoValue = Int(capo.trimmingCharacters(in: .whitespacesAndNewlines)) else { return nil }
+        return try? TuningDefinition(openMIDIPitches: values, capo: capoValue).validated()
+    }
+    private let invalidDraftMessage = "여섯 MIDI 0–127, 카포 0–24, MIDI+카포 ≤127이어야 합니다."
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("튜닝 · 카포").font(.headline)
@@ -52,11 +58,15 @@ struct TuningEditor: View {
                 Text("이전 튜닝의 옥타브는 알 수 없습니다. 프리셋 또는 여섯 MIDI를 명시해 주세요.")
                     .font(.system(size: 11)).foregroundStyle(.secondary)
             }
-            if !message.isEmpty { Text(message).font(.system(size: 11)).foregroundStyle(.red) }
+            if validatedDraft == nil {
+                Text(invalidDraftMessage).font(.system(size: 11)).foregroundStyle(.secondary)
+            } else if !message.isEmpty { Text(message).font(.system(size: 11)).foregroundStyle(.red) }
             HStack {
                 Button("취소") { dismiss() }
                 Spacer()
-                BulkActionButton(title: "적용 · 기존 운지 유지", identifier: "tuning-apply", enabled: workspace.canMutateNotes) { apply() }
+                BulkActionButton(title: "적용 · 기존 운지 유지", identifier: "tuning-apply",
+                    enabled: workspace.canMutateNotes && validatedDraft != nil) { apply() }
+                    .disabled(!workspace.canMutateNotes || validatedDraft == nil)
             }
         }.font(.system(size: 12)).padding(18).frame(width: 380)
             .onAppear {
@@ -69,10 +79,9 @@ struct TuningEditor: View {
         pitches = tuning.openMIDIPitches.map(String.init); message = ""
     }
     private func apply() {
-        let values = pitches.compactMap { Int($0.trimmingCharacters(in: .whitespacesAndNewlines)) }
-        guard values.count == 6, let capoValue = Int(capo.trimmingCharacters(in: .whitespacesAndNewlines)),
-              workspace.setTuning(openMIDIPitches: values, capo: capoValue) else {
-            message = "여섯 MIDI 0–127, 카포 0–24, MIDI+카포 ≤127이어야 합니다."
+        guard let draft = validatedDraft,
+              workspace.setTuning(openMIDIPitches: draft.openMIDIPitches, capo: draft.capo) else {
+            message = invalidDraftMessage
             return
         }
         dismiss()

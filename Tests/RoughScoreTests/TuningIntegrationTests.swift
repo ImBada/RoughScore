@@ -18,7 +18,11 @@ private actor PitchEstimateGate {
         if continuation != nil { return }
         await withCheckedContinuation { startedWaiter = $0 }
     }
-    func finish() { continuation?.resume(returning: DetectedPitch(frequencyHz: 329.63, midi: 64)); continuation = nil }
+    func finish(failing: Bool = false) {
+        if failing { continuation?.resume(throwing: AudioIssue.unsupported) }
+        else { continuation?.resume(returning: DetectedPitch(frequencyHz: 329.63, midi: 64)) }
+        continuation = nil
+    }
 }
 
 @MainActor private final class TuningTextTargetBox { var target: NativeTextUndoTarget? }
@@ -202,6 +206,171 @@ struct TuningIntegrationTests {
         #expect(workspace.project.events.map(\.time) == [3, 4])
     }
 
+    /// The service deliberately ignores cancellation; both completion paths must own their context.
+    @Test(arguments: ["seek", "jump", "pasteCursor", "sourceLeft", "sourceRight", "lane", "tuning",
+                      "selection", "shutdown", "cursorRoundTrip", "sourceRoundTrip", "edit",
+                      "seekSame", "seekInvalid", "sourceSame", "sourceFailure", "laneSame",
+                      "tuningSame", "tuningInvalid", "status"], [false, true])
+    func pendingPitchOwnsAcceptedContextAndPreservesRejectedRequests(action: String, failing: Bool) async throws {
+        let gate = PitchEstimateGate()
+        var service = services()
+        service.detectPitch = { _, _ in try await gate.estimate() }
+        service.makePlayer = { url in
+            if action == "sourceFailure" { throw AudioIssue.playbackFailed }
+            return try AVAudioPlayer(contentsOf: url)
+        }
+        let workspace = Workspace(services: service); defer { workspace.shutdown() }
+        let note = TabEvent(time: 0.2, lane: .left, string: 1, fret: 0, length: nil, tentative: true, memo: "keep\t\nexact")
+        workspace.project = ScoreProject(duration: 2, events: [note])
+        if action == "tuningSame" { #expect(workspace.setTuning(openMIDIPitches: TuningDefinition.standard.openMIDIPitches, capo: 0)) }
+        let directory = try root(); defer { try? FileManager.default.removeItem(at: directory) }
+        #expect(workspace.save(to: directory.appendingPathComponent("baseline.roughscore")))
+        let url = try AudioPreparation.createDemo(project: workspace.project)
+        defer { try? FileManager.default.removeItem(at: url) }
+        workspace.prepared = try await AudioPreparation.prepare(url)
+        workspace.select(note)
+        let baseline = workspace.project, hadUndo = workspace.canUndo
+        let task = try #require(workspace.detectSelectedPitch())
+        await gate.started()
+        let shouldReject = ["seek", "jump", "pasteCursor", "sourceLeft", "sourceRight", "lane", "tuning",
+                            "selection", "shutdown", "cursorRoundTrip", "sourceRoundTrip", "edit"].contains(action)
+        switch action {
+        case "seek": workspace.seek(1.5)
+        case "jump": workspace.jumpToScoreTime(1.5)
+        case "pasteCursor": workspace.placeSelectionCursor(1.5)
+        case "sourceLeft": workspace.switchSource(.left)
+        case "sourceRight": workspace.switchSource(.right)
+        case "lane": workspace.selectLane(.right)
+        case "tuning": #expect(workspace.setTuning(openMIDIPitches: TuningDefinition.dropD.openMIDIPitches, capo: 2))
+        case "selection": workspace.clearSelection()
+        case "shutdown": workspace.shutdown()
+        case "cursorRoundTrip": workspace.seek(1.5); workspace.seek(note.time)
+        case "sourceRoundTrip": workspace.switchSource(.left); workspace.switchSource(.stereo)
+        case "edit": workspace.updateSelected { $0.time = 0.7 }
+        case "seekSame": workspace.seek(note.time)
+        case "seekInvalid": workspace.seek(.nan)
+        case "sourceSame": workspace.switchSource(.stereo)
+        case "sourceFailure": workspace.switchSource(.left); #expect(workspace.source == .stereo && workspace.error != nil)
+        case "laneSame": workspace.selectLane(.left)
+        case "tuningSame": #expect(workspace.setTuning(openMIDIPitches: TuningDefinition.standard.openMIDIPitches, capo: 0))
+        case "tuningInvalid": #expect(!workspace.setTuning(openMIDIPitches: TuningDefinition.standard.openMIDIPitches, capo: 25))
+        default: workspace.status = "unrelated status"
+        }
+        let beforeCompletion = workspace.project
+        if !["tuning", "edit"].contains(action) {
+            #expect(workspace.project == baseline && workspace.canUndo == hadUndo && !workspace.dirty)
+        }
+        if ["seek", "jump", "pasteCursor", "sourceLeft"].contains(action) { #expect(workspace.selectedID == note.id) }
+        await gate.finish(failing: failing); await task.value
+        #expect(workspace.project == beforeCompletion && !workspace.detectingPitch)
+        if shouldReject {
+            #expect(workspace.detectedPitch == nil && workspace.pitchDetectionMessage.isEmpty)
+        } else if failing {
+            #expect(workspace.detectedPitch == nil && workspace.pitchDetectionMessage == "음고 추정 불가 · 직접 MIDI 입력 가능")
+        } else {
+            #expect(workspace.detectedPitch?.nearestMIDI == 64 && !workspace.pitchDetectionMessage.isEmpty)
+        }
+    }
+
+    @Test(arguments: [false, true])
+    func staleCompletionCannotPublishOrFinishANewerPitchRequest(failing: Bool) async throws {
+        let first = PitchEstimateGate(), second = PitchEstimateGate()
+        var service = services()
+        service.detectPitch = { _, time in try await (time < 0.5 ? first : second).estimate() }
+        let workspace = Workspace(services: service); defer { workspace.shutdown() }
+        let note = TabEvent(time: 0.2, lane: .left, string: 1, fret: 0, memo: "keep")
+        workspace.project = ScoreProject(duration: 2, events: [note])
+        let url = try AudioPreparation.createDemo(project: workspace.project)
+        defer { try? FileManager.default.removeItem(at: url) }
+        workspace.prepared = try await AudioPreparation.prepare(url)
+        workspace.select(note)
+        let oldTask = try #require(workspace.detectSelectedPitch()); await first.started()
+        workspace.seek(1.5); workspace.updateSelected { $0.time = 0.6 }
+        let newTask = try #require(workspace.detectSelectedPitch()); await second.started()
+        let baseline = workspace.project
+        await first.finish(failing: failing); await oldTask.value
+        #expect(workspace.detectingPitch && workspace.detectedPitch == nil && workspace.pitchDetectionMessage.isEmpty)
+        #expect(workspace.project == baseline && workspace.selectedID == note.id)
+        await second.finish(); await newTask.value
+        #expect(!workspace.detectingPitch && workspace.detectedPitch?.nearestMIDI == 64)
+        #expect(workspace.project == baseline && workspace.selectedID == note.id)
+    }
+
+    /// Generated media through actual native player ports: the accepted handover samples the live clock.
+    @Test(arguments: ["tick", "sourceLeft"], [false, true])
+    func pendingPitchRejectsActualPlaybackClockChanges(action: String, failing: Bool) async throws {
+        let gate = PitchEstimateGate()
+        var service = services()
+        service.detectPitch = { _, _ in try await gate.estimate() }
+        service.prepareTransport = { _ in }
+        service.makePlayer = { try AVAudioPlayer(contentsOf: $0) }
+        let workspace = Workspace(services: service); defer { workspace.shutdown() }
+        let note = TabEvent(time: 0.2, lane: .left, string: 1, fret: 0)
+        let url = try AudioPreparation.createDemo(project: ScoreProject(duration: 3, events: [note]))
+        defer { try? FileManager.default.removeItem(at: url) }
+        #expect(await workspace.loadAudio(at: url)?.value == true)
+        workspace.project.events = [note]; workspace.select(note)
+        let baseline = workspace.project, dirty = workspace.dirty, hadUndo = workspace.canUndo
+        workspace.togglePlayback(); #expect(workspace.playing)
+        let task = try #require(workspace.detectSelectedPitch()); await gate.started()
+        try await Task.sleep(for: .milliseconds(80))
+        if action == "tick" { workspace.tick() } else { workspace.switchSource(.left) }
+        #expect(workspace.cursor > note.time && workspace.selectedID == note.id && workspace.playing)
+        if action == "sourceLeft" { #expect(workspace.source == .left && workspace.lane == .left) }
+        await gate.finish(failing: failing); await task.value
+        #expect(workspace.detectedPitch == nil && workspace.pitchDetectionMessage.isEmpty && !workspace.detectingPitch)
+        #expect(workspace.project == baseline && workspace.canUndo == hadUndo && workspace.dirty == dirty)
+    }
+
+    @Test func nativeApplyRequiresWholeValidDraftAndKeepsUndoRedoDraftLocal() throws {
+        let workspace = Workspace(services: services()); defer { workspace.shutdown() }
+        let directory = try root(); defer { try? FileManager.default.removeItem(at: directory) }
+        let note = TabEvent(time: 0.2, lane: .left, string: 6, fret: 0, memo: "unchanged")
+        workspace.project = ScoreProject(duration: 2, events: [note])
+        workspace.project.tuning[5] = "D" // Six unresolved drafts must stay blank, without octave guesses.
+        #expect(workspace.save(to: directory.appendingPathComponent("legacy.roughscore")))
+        let baseline = workspace.project
+        let host = NotePointerTests.Host(TuningEditor(workspace: workspace), height: 650)
+        defer { host.close() }
+        func applyButton() throws -> NSButton {
+            try #require(host.descendants().compactMap { $0 as? NSButton }.first { $0.identifier?.rawValue == "tuning-apply" })
+        }
+        let fields = host.descendants().compactMap { $0 as? NSTextField }.filter { $0.placeholderString == "open MIDI" }
+        let capoField = try #require(host.descendants().compactMap { $0 as? NSTextField }.first { $0.placeholderString == "0–24" })
+        #expect(fields.count == 6 && fields.allSatisfy { $0.stringValue.isEmpty })
+        func enter(_ field: NSTextField, _ value: String) throws {
+            #expect(host.window.makeFirstResponder(field))
+            let editor = try #require(host.window.firstResponder as? NSTextView)
+            editor.insertText(value, replacementRange: NSRange(location: 0, length: (editor.string as NSString).length))
+            #expect(host.window.makeFirstResponder(nil)); host.settle()
+        }
+        func reject() throws {
+            #expect(try !applyButton().isEnabled, "MIDI draft \(fields.map(\.stringValue)), capo \(capoField.stringValue)")
+            try applyButton().performClick(nil); host.settle()
+            #expect(workspace.project == baseline && !workspace.canUndo && !workspace.canRedo && !workspace.dirty)
+        }
+        try reject()
+        for (field, value) in zip(fields, TuningDefinition.dropD.openMIDIPitches) { try enter(field, String(value)) }
+        #expect(try applyButton().isEnabled)
+        for value in ["25", "-1", "", "two", String(Int.max)] { try enter(capoField, value); try reject() }
+        try enter(capoField, "2")
+        for value in ["", "C4", "-1", "128", "127", String(Int.max)] { try enter(fields[0], value); try reject() }
+        try enter(fields[0], " 67 ")
+        #expect(try applyButton().isEnabled)
+        let expected = TuningDefinition(openMIDIPitches: [67, 59, 55, 50, 45, 38], capo: 2)
+        try applyButton().performClick(nil); host.settle()
+        #expect(workspace.project.resolvedTuning == expected && workspace.project.events == [note] && workspace.dirty)
+        let applied = workspace.project
+        try applyButton().performClick(nil); host.settle() // Valid no-op adds no history.
+        workspace.undoEdit(); host.settle()
+        #expect(workspace.project == baseline && !workspace.canUndo && workspace.canRedo && !workspace.dirty)
+        #expect(fields[0].stringValue == " 67 " && capoField.stringValue == "2")
+        #expect(try applyButton().isEnabled)
+        workspace.redoEdit(); host.settle()
+        #expect(workspace.project == applied && workspace.project.events == [note])
+        #expect(fields[0].stringValue == " 67 " && capoField.stringValue == "2")
+    }
+
     @Test func actualHostedTuningPresetCapoRejectApplyAndCandidateButtons() throws {
         let directory = try root(); defer { try? FileManager.default.removeItem(at: directory) }
         let workspace = Workspace(services: services()); defer { workspace.shutdown() }
@@ -225,9 +394,11 @@ struct TuningIntegrationTests {
             #expect(tuning.window.makeFirstResponder(nil)); tuning.settle()
         }
         try enterCapo("25")
+        #expect(try !button(tuning, "tuning-apply").isEnabled)
         try button(tuning, "tuning-apply").performClick(nil); tuning.settle()
         #expect(workspace.project == baseline && !workspace.dirty && !workspace.canUndo)
         try enterCapo("2")
+        #expect(try button(tuning, "tuning-apply").isEnabled)
         try button(tuning, "tuning-apply").performClick(nil); tuning.settle()
         #expect(workspace.project.resolvedTuning == TuningDefinition(openMIDIPitches: TuningDefinition.dropD.openMIDIPitches, capo: 2))
         #expect(workspace.project.events == [note] && workspace.selectedID == note.id && workspace.dirty)
