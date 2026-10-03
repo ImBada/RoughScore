@@ -19,6 +19,7 @@ struct WorkspaceServices: Sendable {
         panel.allowedContentTypes = [UTType(filenameExtension: "roughscore") ?? .json]
         return panel.runModal() == .OK ? panel.url : nil
     }
+    var nativeTextUndo: @MainActor @Sendable () -> NativeTextUndoTarget? = { NativeTextUndoTarget.active() }
     var fileExists: @Sendable (URL) -> Bool
     var lastProject: @MainActor @Sendable () -> URL?
     var rememberProject: @MainActor @Sendable (URL) -> Void
