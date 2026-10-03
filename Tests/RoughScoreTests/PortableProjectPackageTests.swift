@@ -309,4 +309,40 @@ struct PortableProjectPackageTests {
         let resolved = try snapshot.resolve(assetID: snapshot.project.originalAsset!.id)
         #expect(try f.hash(resolved) == f.hash(source))
     }
+
+    @Test func generatedAACCollectsAndMatchesExistingAudioMetadata() throws {
+        let f = try Fixture(); let wav = try f.audio("aac-source.wav")
+        let aac = f.url("generated.m4a")
+        let converter = Process(); converter.executableURL = URL(fileURLWithPath: "/usr/bin/afconvert")
+        converter.arguments = [wav.path, aac.path, "-f", "m4af", "-d", "aac@44100", "-b", "128000"]
+        try converter.run(); converter.waitUntilExit()
+        #expect(converter.terminationStatus == 0)
+        let project = try f.project(aac)
+        let snapshot = try PortableProjectPackage.collect(project, to: f.url("aac.roughscorepkg"))
+        #expect(snapshot.project.originalAsset?.identity == project.originalAsset?.identity)
+        #expect(snapshot.project.analyses == project.analyses)
+        let resolved = try snapshot.resolve(assetID: project.originalAsset!.id)
+        #expect(try f.hash(resolved) == f.hash(aac))
+    }
+
+    @Test func readerAndResolverCancellationDoNotMutatePackage() throws {
+        let f = try Fixture(); let source = try f.audio("source.caf", frames: 300_000)
+        let project = try f.project(source)
+        let snapshot = try PortableProjectPackage.collect(project, to: f.url("cancel.roughscorepkg"))
+        let json = snapshot.root.appendingPathComponent("project.json")
+        let before = try f.hash(json)
+        var checks = 0
+        #expect(throws: CancellationError.self) {
+            try PortableProjectPackage.read(at: snapshot.root, cancellation: {
+                checks += 1; if checks == 3 { throw CancellationError() }
+            })
+        }
+        #expect(checks == 3)
+        #expect(try f.hash(json) == before)
+        #expect(throws: CancellationError.self) {
+            try snapshot.resolve(assetID: project.originalAsset!.id, cancellation: { throw CancellationError() })
+        }
+        #expect(try PortableProjectPackage.read(at: snapshot.root).project == snapshot.project)
+    }
+
 }

@@ -68,12 +68,15 @@ public enum PortableProjectPackage {
         let stageName = ".roughscore-stage-" + UUID().uuidString
         guard mkdirat(parent.fd, stageName, 0o700) == 0 else { throw posixError() }
         let stageURL = parentURL.appendingPathComponent(stageName, isDirectory: true)
-        let stage = try Directory(stageURL)
+        var ownedStageInfo = stat()
+        guard fstatat(parent.fd, stageName, &ownedStageInfo, AT_SYMLINK_NOFOLLOW) == 0 else { throw posixError() }
         var committed = false
         defer {
             // Never remove somebody else's directory if its name was replaced during the operation.
-            if !committed, parent.matches(stageName, stage.info) { try? FileManager.default.removeItem(at: stageURL) }
+            if !committed, parent.matches(stageName, ownedStageInfo) { try? FileManager.default.removeItem(at: stageURL) }
         }
+        let stage = try Directory(stageURL)
+        guard sameFile(stage.info, ownedStageInfo) else { throw PackageError.unsafePath }
         var assets = candidate.assets ?? []
         if candidate.assets == nil, let legacyPath = candidate.audioPath {
             // Allocate a new asset UUID, not a claimed historical content identity or numeric tuning.
