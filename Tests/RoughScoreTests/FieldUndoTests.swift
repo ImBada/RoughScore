@@ -1,6 +1,7 @@
 import AppKit
 import Foundation
 import RoughScoreCore
+import SwiftUI
 import Testing
 @testable import RoughScore
 
@@ -8,12 +9,202 @@ import Testing
 private final class TextTargetBox { var target: NativeTextUndoTarget? }
 
 @MainActor
+@Suite(.serialized)
 struct FieldUndoTests {
     private func services(_ box: TextTargetBox = TextTargetBox()) -> WorkspaceServices {
         var value = WorkspaceServices.live
         value.rememberProject = { _ in }; value.lastProject = { nil }; value.chooseSaveDestination = { _ in nil }
         value.nativeTextUndo = { box.target }
         return value
+    }
+
+    /// Hosts the actual inspector/representable in a hidden window. Native command
+    /// routing is injected separately: this fixture cannot establish NSApp.keyWindow.
+    @MainActor private final class HostedInspector {
+        let host: NSHostingView<NoteInspector>
+        let window: NSWindow
+        let editor: MemoTextView
+
+        init(_ workspace: Workspace) throws {
+            _ = NSApplication.shared
+            host = NSHostingView(rootView: NoteInspector(workspace: workspace))
+            host.frame = NSRect(x: 0, y: 0, width: 290, height: 900)
+            window = NSWindow(contentRect: host.frame, styleMask: [.titled], backing: .buffered, defer: false)
+            window.isReleasedWhenClosed = false
+            window.contentView = host
+            Self.settle(host)
+            editor = try #require(Self.descendants(host).compactMap { $0 as? MemoTextView }.first)
+            editor.history.groupsByEvent = false
+        }
+
+        private static func descendants(_ view: NSView) -> [NSView] {
+            [view] + view.subviews.flatMap { descendants($0) }
+        }
+
+        private static func settle(_ view: NSView) {
+            view.layoutSubtreeIfNeeded()
+            RunLoop.current.run(until: Date().addingTimeInterval(0.03))
+            view.layoutSubtreeIfNeeded()
+        }
+
+        func settle() { Self.settle(host) }
+        func currentEditor() throws -> MemoTextView {
+            try #require(Self.descendants(host).compactMap { $0 as? MemoTextView }.first)
+        }
+        func close() { window.contentView = nil; window.close() }
+        func insert(_ text: String) {
+            editor.history.beginUndoGrouping()
+            editor.insertText(text, replacementRange: editor.selectedRange())
+            editor.history.endUndoGrouping()
+        }
+    }
+
+    @Test func hostedMemoSameIDRestorationInvalidatesOnlyObsoleteNativeHistory() throws {
+        let box = TextTargetBox()
+        let workspace = Workspace(services: services(box)); defer { workspace.shutdown() }
+        workspace.project = ScoreProject(duration: 20)
+        workspace.seekForEditing(2.123456789, lane: .right); workspace.inputDigit(7, at: 100)
+        let original = try #require(workspace.selected)
+        let inspector = try HostedInspector(workspace); defer { inspector.close() }
+        let editor = inspector.editor
+        #expect(inspector.window.makeFirstResponder(editor))
+        box.target = NativeTextUndoTarget(editor.history, editor: editor)
+        var focusRequests = 0
+        workspace.requestKeyboardFocus = { focusRequests += 1 }
+
+        inspector.insert("abcdef"); inspector.settle()
+        #expect(workspace.selected?.memo == "abcdef" && editor.history.canUndo)
+        editor.setSelectedRange(NSRange(location: 2, length: 2))
+        workspace.status = "Unrelated observable update"
+        inspector.settle()
+        #expect(editor.selectedRange() == NSRange(location: 2, length: 2) && editor.history.canUndo)
+        #expect(inspector.window.firstResponder === editor && focusRequests == 0)
+
+        workspace.performUndo(); inspector.settle()
+        #expect(editor.string.isEmpty && workspace.selected?.memo == "")
+        #expect(editor.selectedRange() == NSRange(location: 0, length: 0))
+        #expect(!workspace.canPerformUndo && workspace.canUndo && editor.history.canRedo)
+        let nativeBoundary = workspace.project
+        workspace.performUndo(); inspector.settle()
+        #expect(workspace.project == nativeBoundary)
+        workspace.performRedo(); inspector.settle()
+        #expect(editor.string == "abcdef" && workspace.selected?.memo == "abcdef" && editor.history.canUndo)
+        #expect(inspector.window.firstResponder === editor && focusRequests == 0)
+
+        // Same-value publications retain both an undo and a redo stack.
+        inspector.insert("g"); inspector.settle()
+        workspace.performUndo(); inspector.settle()
+        #expect(editor.string == "abcdef" && editor.history.canUndo && editor.history.canRedo)
+        editor.setSelectedRange(NSRange(location: 3, length: 2))
+        workspace.setMemo("abcdef", eventID: original.id); inspector.settle()
+        #expect(editor.history.canUndo && editor.history.canRedo)
+        #expect(editor.selectedRange() == NSRange(location: 3, length: 2))
+
+        workspace.setMemo("abc", eventID: original.id); inspector.settle()
+        #expect(editor.string == "abc" && workspace.selected?.memo == "abc")
+        #expect(editor.selectedRange() == NSRange(location: 3, length: 0))
+        #expect(!editor.history.canUndo && !editor.history.canRedo)
+        #expect(inspector.window.firstResponder === editor && focusRequests == 0)
+        #expect(workspace.selected?.id == original.id && workspace.selected?.time == original.time)
+        #expect(workspace.selected?.lane == .right && workspace.selected?.length == nil)
+
+        // An exhausted native target still consumes the command after restoration.
+        let restored = workspace.project
+        workspace.performUndo(); workspace.performRedo(); inspector.settle()
+        #expect(workspace.project == restored && editor.string == "abc" && focusRequests == 0)
+        box.target = nil
+        #expect(inspector.window.makeFirstResponder(nil))
+        workspace.undoEdit(); inspector.settle()
+        #expect(editor.string.isEmpty && workspace.selected?.memo == "")
+        workspace.redoEdit(); inspector.settle()
+        #expect(editor.string == "abc" && workspace.selected?.memo == "abc")
+        #expect(!editor.history.canUndo && !editor.history.canRedo)
+
+        workspace.seekForEditing(3); workspace.inputDigit(2, at: 101); inspector.settle()
+        let secondID = try #require(workspace.selectedID)
+        #expect(secondID != original.id && editor.string.isEmpty && !editor.history.canUndo)
+        #expect(inspector.window.makeFirstResponder(editor))
+        inspector.insert("second"); inspector.settle()
+        #expect(workspace.selected?.id == secondID && workspace.selected?.memo == "second")
+        #expect(workspace.project.events.first { $0.id == original.id }?.memo == "abc")
+    }
+
+    @Test func hostedMemo101AutosaveExitTabUndoRedoAndReopenDisplayAgree() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("RoughScore-hosted-field-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let url = root.appendingPathComponent("memo.roughscore")
+        let workspace = Workspace(services: services()); defer { workspace.shutdown() }
+        workspace.project = ScoreProject(duration: 20)
+        #expect(workspace.save(to: url))
+        workspace.seekForEditing(2.123456789, lane: .right); workspace.inputDigit(7, at: 100)
+        let original = try #require(workspace.selected)
+        let inspector = try HostedInspector(workspace); defer { inspector.close() }
+        let editor = inspector.editor
+        #expect(inspector.window.makeFirstResponder(editor))
+        for _ in 1...50 { inspector.insert("가") }
+        await workspace.awaitAutosave(); inspector.settle()
+        #expect(!workspace.dirty && editor.string.count == 50 && editor.history.canUndo)
+        #expect(try JSONDecoder().decode(ScoreProject.self, from: Data(contentsOf: url)) == workspace.project)
+        for _ in 51...101 { inspector.insert("가") }
+        inspector.settle()
+        #expect(workspace.selected?.memo.count == 101 && editor.string.count == 101 && editor.history.canUndo)
+        #expect(inspector.window.makeFirstResponder(nil))
+        workspace.undoEdit(); inspector.settle()
+        #expect(workspace.selected?.memo == "" && workspace.project.events.count == 1)
+        #expect(editor.string.isEmpty && !editor.history.canUndo && !editor.history.canRedo)
+        workspace.undoEdit(); inspector.settle()
+        #expect(workspace.project.events.isEmpty && !workspace.canUndo)
+        workspace.redoEdit(); inspector.settle()
+        workspace.redoEdit(); inspector.settle()
+        let restoredEditor = try inspector.currentEditor()
+        #expect(restoredEditor.string.count == 101 && workspace.selected?.memo == restoredEditor.string)
+        #expect(workspace.selected?.id == original.id && workspace.selected?.time == original.time)
+        #expect(workspace.selected?.lane == .right && workspace.selected?.length == nil)
+        await workspace.awaitAutosave()
+        let saved = workspace.project
+        #expect(!workspace.dirty)
+        #expect(try JSONDecoder().decode(ScoreProject.self, from: Data(contentsOf: url)) == saved)
+        #expect(await workspace.loadProject(at: url)?.value == true)
+        #expect(workspace.project == saved)
+        workspace.select(try #require(workspace.project.events.first { $0.id == original.id }))
+        inspector.settle()
+        #expect(try inspector.currentEditor().string == workspace.selected?.memo)
+    }
+
+    @Test func hostedMemoMarkedTextSurvivesUnrelatedUpdatesAndCommitKeepsCaret() throws {
+        let workspace = Workspace(services: services()); defer { workspace.shutdown() }
+        workspace.project = ScoreProject(duration: 20)
+        workspace.inputDigit(7, at: 100)
+        let inspector = try HostedInspector(workspace); defer { inspector.close() }
+        let editor = inspector.editor
+        #expect(inspector.window.makeFirstResponder(editor))
+        // Start composition before the queued SwiftUI update for the insertion.
+        inspector.insert("prefix")
+        editor.setMarkedText("가", selectedRange: NSRange(location: 1, length: 0), replacementRange: editor.selectedRange())
+        let selection = editor.selectedRange()
+        let markedRange = editor.markedRange()
+        #expect(editor.hasMarkedText())
+        workspace.status = "Composition must survive an unrelated publication"
+        inspector.settle()
+        #expect(editor.hasMarkedText() && editor.markedRange() == markedRange)
+        #expect(editor.string == "prefix가" && editor.selectedRange() == selection)
+        #expect(inspector.window.firstResponder === editor && editor.history.canUndo)
+        editor.history.beginUndoGrouping()
+        editor.insertText("각", replacementRange: editor.markedRange())
+        editor.history.endUndoGrouping()
+        inspector.settle()
+        #expect(!editor.hasMarkedText() && editor.string == "prefix각")
+        #expect(workspace.selected?.memo == editor.string && editor.selectedRange().location == 7)
+        #expect(editor.history.canUndo && inspector.window.firstResponder === editor)
+
+        // An authoritative same-ID replacement also ends obsolete marked text safely.
+        editor.setMarkedText("나", selectedRange: NSRange(location: 1, length: 0), replacementRange: editor.selectedRange())
+        let id = try #require(workspace.selectedID)
+        workspace.setMemo("restored", eventID: id); inspector.settle()
+        #expect(editor.string == "restored")
+        #expect(workspace.selected?.memo == "restored" && !editor.hasMarkedText())
+        #expect(!editor.history.canUndo && !editor.history.canRedo && inspector.window.firstResponder === editor)
     }
 
     @Test func hundredAndOneCharactersCoalesceAcrossAutosaveAndUndoCreationNext() async throws {

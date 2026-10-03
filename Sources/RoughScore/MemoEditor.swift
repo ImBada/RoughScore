@@ -3,7 +3,7 @@ import SwiftUI
 
 /// A plain AppKit editor retains its own caret, marked text and native undo history.
 struct MemoEditor: NSViewRepresentable {
-    let workspace: Workspace
+    @ObservedObject var workspace: Workspace
     let eventID: UUID
     func makeCoordinator() -> Coordinator { Coordinator(workspace: workspace, eventID: eventID) }
     func makeNSView(context: Context) -> NSScrollView {
@@ -34,10 +34,17 @@ struct MemoEditor: NSViewRepresentable {
         if context.coordinator.eventID != eventID {
             workspace.endMemoEditing(eventID: context.coordinator.eventID)
             context.coordinator.eventID = eventID; view.history.removeAllActions()
+            context.coordinator.lastModelMemo = nil
         }
+        let modelChanged = context.coordinator.lastModelMemo != memo
+        context.coordinator.lastModelMemo = memo
         // Do not rewrite identical text: native insertion/undo/composition owns the caret.
-        if view.string != memo {
+        // Marked text can differ from the committed memo during an unrelated publication.
+        if view.string != memo && (!view.hasMarkedText() || modelChanged) {
+            context.coordinator.isUpdatingModel = true
+            defer { context.coordinator.isUpdatingModel = false }
             let range = view.selectedRange()
+            if view.hasMarkedText() { view.unmarkText() }
             view.string = memo; view.history.removeAllActions()
             let count = (memo as NSString).length
             let location = min(range.location, count)
@@ -47,10 +54,13 @@ struct MemoEditor: NSViewRepresentable {
     @MainActor final class Coordinator: NSObject, NSTextViewDelegate {
         weak var workspace: Workspace?
         var eventID: UUID
+        var lastModelMemo: String?
+        var isUpdatingModel = false
         init(workspace: Workspace, eventID: UUID) { self.workspace = workspace; self.eventID = eventID }
         func textDidChange(_ notification: Notification) {
-            guard let view = notification.object as? NSTextView else { return }
+            guard !isUpdatingModel, let view = notification.object as? NSTextView else { return }
             workspace?.setMemo(view.string, eventID: eventID)
+            lastModelMemo = workspace?.project.events.first { $0.id == eventID }?.memo
         }
     }
 }
