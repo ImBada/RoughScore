@@ -30,8 +30,8 @@ struct RoughScoreApp: App {
         .defaultSize(width: 1440, height: 900)
         .commands {
             CommandGroup(replacing: .undoRedo) {
-                Button("채보 실행 취소") { workspace.undoEdit() }.keyboardShortcut("z").disabled(!workspace.canUndo)
-                Button("채보 다시 실행") { workspace.redoEdit() }.keyboardShortcut("z", modifiers: [.command, .shift]).disabled(!workspace.canRedo || workspace.positionDrag != nil)
+                Button("실행 취소") { workspace.performUndo() }.keyboardShortcut("z").disabled(!workspace.canPerformUndo)
+                Button("다시 실행") { workspace.performRedo() }.keyboardShortcut("z", modifiers: [.command, .shift]).disabled(!workspace.canPerformRedo)
             }
             CommandGroup(replacing: .newItem) {
                 Button("오디오 열기…") { workspace.importAudio() }.keyboardShortcut("o")

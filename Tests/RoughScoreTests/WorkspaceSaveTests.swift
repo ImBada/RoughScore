@@ -80,7 +80,7 @@ struct WorkspaceSaveTests {
         #expect(workspace.project.analyses.isEmpty)
         #expect(workspace.dirty && workspace.saveState == .pending)
         #expect(try f.read() == disk)
-        try await Task.sleep(for: .milliseconds(1100))
+        await workspace.awaitAutosave()
         #expect(try f.read() == workspace.project)
         #expect(!workspace.dirty && workspace.saveState == .saved)
     }
@@ -103,7 +103,7 @@ struct WorkspaceSaveTests {
         await gate.finish(.failure(AudioIssue.unsupported))
         #expect(!(await task.value))
         #expect(workspace.dirty)
-        try await Task.sleep(for: .milliseconds(1100))
+        await workspace.awaitAutosave()
         #expect(try f.read() == expected)
         #expect(workspace.project == expected && !workspace.dirty && workspace.saveState == .saved)
     }
@@ -119,7 +119,7 @@ struct WorkspaceSaveTests {
         #expect(await workspace.loadProject(at: f.url)?.value == true)
         #expect(workspace.dirty && workspace.project.duration == 21 && workspace.project.analyses.isEmpty)
         #expect(try f.read() == disk)
-        try await Task.sleep(for: .milliseconds(1100))
+        await workspace.awaitAutosave()
         #expect(try f.read() == workspace.project)
         #expect(!workspace.dirty)
     }
