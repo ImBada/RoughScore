@@ -6,6 +6,26 @@ import RoughScoreCore
 import MusicUnderstanding
 #endif
 
+/// The application's actual player boundary; failures and live clocks are injectable in Workspace tests.
+@MainActor
+protocol AudioPlayerTransport: AnyObject {
+    var currentTime: TimeInterval { get set }
+    var rate: Float { get set }
+    var volume: Float { get set }
+    var enableRate: Bool { get set }
+    var isPlaying: Bool { get }
+    var deviceCurrentTime: TimeInterval { get }
+    var sharedClockID: UUID? { get }
+    func play(atTime time: TimeInterval) -> Bool
+    func prepareToPlay() -> Bool
+    func play() -> Bool
+    func pause()
+    func stop()
+}
+
+extension AudioPlayerTransport { var sharedClockID: UUID? { nil } }
+extension AVAudioPlayer: AudioPlayerTransport {}
+
 struct PreparedAudio: Sendable {
     let original: URL
     let left: URL
@@ -22,11 +42,12 @@ struct PreparedAudio: Sendable {
 }
 
 enum AudioIssue: LocalizedError {
-    case unsupported, tooLong, unavailable, sourceChanged
+    case unsupported, tooLong, unavailable, sourceChanged, playbackFailed
     var errorDescription: String? {
         switch self {
         case .unsupported: "비어 있거나 지원하지 않는 오디오입니다. 모노 또는 스테레오 파일을 선택하세요."
         case .tooLong: "초안에서는 1시간 이내의 오디오를 사용할 수 있습니다."
+        case .playbackFailed: "오디오 재생을 준비하지 못했습니다. 이전 청취 채널을 유지합니다."
         case .sourceChanged: "오디오 준비 중 원본 내용이 바뀌었습니다. 다시 연결해 주세요."
         case .unavailable: "Music Understanding 분석에는 macOS 27과 해당 SDK가 필요합니다. TAB 편집과 재생은 사용할 수 있습니다."
         }
@@ -81,6 +102,8 @@ enum AudioPreparation {
                     offset += Int64(input.frameLength)
                     await progress(Double(offset) / Double(file.length))
                 }
+                // Flush final PCM frames before a transport can open the channel files.
+                leftFile.close(); rightFile.close()
                 try Task.checkCancellation()
                 guard try contentFingerprint(url) == fingerprint else { throw AudioIssue.unsupported }
                 return PreparedAudio(original: url, left: leftURL, right: rightURL, directory: directory,
