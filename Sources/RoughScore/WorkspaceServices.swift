@@ -11,7 +11,7 @@ struct WorkspaceServices: Sendable {
     var readProject: @Sendable (URL) async throws -> ScoreProject
     var analyze: @Sendable (URL, Double) async throws -> AnalysisSummary
     var analyzerVersion = "apple-musicunderstanding-v1"
-    var makePlayer: @MainActor @Sendable (URL) throws -> AVAudioPlayer
+    var makePlayer: @MainActor @Sendable (URL) throws -> any AudioPlayerTransport
     var writeProject: @MainActor @Sendable (Data, URL) throws -> Void = { try $0.write(to: $1, options: .atomic) }
     var chooseSaveDestination: @MainActor @Sendable (String) -> URL? = { title in
         let panel = NSSavePanel()

@@ -84,7 +84,8 @@ final class Workspace: ObservableObject {
     private var autosaveTask: Task<Void, Never>?
     private var projectURL: URL?
     private var projectRevision: UInt64 = 0
-    private var player: AVAudioPlayer?
+    private var player: (any AudioPlayerTransport)?
+    private var preparedPlayers: [ListeningSource: any AudioPlayerTransport] = [:]
     private var timer: Timer?
     private var analysisTask: Task<Void, Never>?
     private var demoURL: URL?
@@ -186,11 +187,11 @@ final class Workspace: ObservableObject {
         guard playing, let player else { return }
         if looping && player.currentTime >= loopEnd {
             player.currentTime = loopStart
-            if !player.isPlaying { player.play() }
+            if !player.isPlaying { playing = player.play() && player.isPlaying }
         } else if !player.isPlaying {
             playing = false
         }
-        cursor = player.currentTime
+        cursor = boundedPlaybackTime(player.currentTime)
         if followScore && selectedID == nil && positionDrag == nil { followScoreCursor() }
         if selectedID == nil && positionDrag == nil && (cursor >= windowEnd || cursor < windowStart) {
             windowStart = max(0, min(project.duration - min(windowLength, project.duration), floor(cursor / windowLength) * windowLength))
@@ -243,36 +244,71 @@ final class Workspace: ObservableObject {
     }
 
     func togglePlayback() {
-        guard canEdit else { return }
-        guard let player else { return }
-        if playing { player.pause(); playing = false }
-        else {
+        guard canEdit, let player else { return }
+        if playing {
+            player.pause()
+            cursor = boundedPlaybackTime(player.currentTime)
+            playing = false
+        } else {
             if looping && (cursor < loopStart || cursor >= loopEnd) { seek(loopStart) }
-            player.currentTime = cursor; player.play(); playing = true
+            player.currentTime = cursor
+            playing = player.play() && player.isPlaying
+            if !playing { error = AudioIssue.playbackFailed.localizedDescription }
         }
     }
 
+    private func boundedPlaybackTime(_ liveTime: Double) -> Double {
+        TimeBounds.clamp(liveTime, duration: project.duration) ??
+            TimeBounds.clamp(cursor, duration: project.duration) ?? 0
+    }
+
     func switchSource(_ value: ListeningSource) {
-        guard canMutateNotes else { return }
+        guard canMutateNotes, value != source else { return }
         let previousLayout = scoreLayout
-        let resume = playing
-        player?.pause(); playing = false; source = value
+        if let prepared {
+            let identity = projectIdentity
+            do {
+                // Prepare before sampling the clock: decoding/setup must not freeze or rewind the old player.
+                let destination: any AudioPlayerTransport
+                if let cached = preparedPlayers[value] { destination = cached }
+                else {
+                    destination = try services.makePlayer(prepared.url(for: value))
+                    destination.enableRate = true
+                    destination.rate = rate
+                    guard destination.prepareToPlay() else { throw AudioIssue.playbackFailed }
+                    guard canMutateNotes, projectIdentity == identity,
+                          self.prepared?.directory == prepared.directory else { throw CancellationError() }
+                    preparedPlayers[value] = destination
+                }
+                let old = player
+                let sampledTime = old?.currentTime ?? cursor
+                let liveTime = boundedPlaybackTime(sampledTime)
+                let loopWrap = looping && sampledTime.isFinite && sampledTime >= loopEnd
+                let resume = playing && (old?.isPlaying == true || loopWrap)
+                destination.rate = rate
+                destination.currentTime = loopWrap ? loopStart : liveTime
+                // A failed destination never interrupts the usable old transport or commits UI state.
+                if resume && !(destination.play() && destination.isPlaying) {
+                    destination.pause()
+                    preparedPlayers.removeValue(forKey: value)
+                    throw AudioIssue.playbackFailed
+                }
+                old?.pause()
+                player = destination
+                cursor = loopWrap ? loopStart : liveTime
+                playing = resume && destination.isPlaying
+            } catch {
+                playing = player?.isPlaying == true
+                self.error = error.localizedDescription
+                return
+            }
+        }
+        source = value
         if value != .stereo {
             lane = value == .left ? .left : .right
             if let selected, selected.lane != lane { clearSelection() }
         }
         reflowScore(from: previousLayout)
-        configurePlayer()
-        if resume { player?.play(); playing = true }
-    }
-
-    private func configurePlayer() {
-        guard let prepared else { player = nil; return }
-        do {
-            player = try AVAudioPlayer(contentsOf: prepared.url(for: source))
-            player?.enableRate = true; player?.rate = rate
-            player?.currentTime = cursor; player?.prepareToPlay()
-        } catch { self.error = error.localizedDescription }
     }
 
     func moveWindow(_ direction: Double) {
@@ -827,7 +863,7 @@ final class Workspace: ObservableObject {
             }
             guard var candidate = staged else { return false }
             try requireCurrent(operation)
-            let stagedPlayer: AVAudioPlayer?
+            let stagedPlayer: (any AudioPlayerTransport)?
             do {
                 let readyPlayer = try preparePlayer(for: candidate)
                 if let audio = candidate.audio, let identity = audio.identity {
@@ -867,7 +903,7 @@ final class Workspace: ObservableObject {
         }
     }
 
-    private func preparePlayer(for staged: StagedWorkspace) throws -> AVAudioPlayer? {
+    private func preparePlayer(for staged: StagedWorkspace) throws -> (any AudioPlayerTransport)? {
         guard let audio = staged.audio else { return nil }
         let candidate = try services.makePlayer(audio.url(for: .stereo))
         candidate.enableRate = true; candidate.rate = rate
@@ -876,7 +912,7 @@ final class Workspace: ObservableObject {
         return candidate
     }
 
-    private func activate(_ staged: StagedWorkspace, player stagedPlayer: AVAudioPlayer?) {
+    private func activate(_ staged: StagedWorkspace, player stagedPlayer: (any AudioPlayerTransport)?) {
         stopAndCleanAudio()
         let previousDemo = demoURL
         if let previousDemo, previousDemo != staged.audio?.original {
@@ -895,6 +931,7 @@ final class Workspace: ObservableObject {
         loopStart = staged.isDemo ? 2 : 0; loopEnd = staged.isDemo ? 6 : min(project.duration, 4)
         looping = false; source = .stereo
         player = stagedPlayer
+        if let stagedPlayer { preparedPlayers[.stereo] = stagedPlayer }
         projectRevision &+= 1
         savedProject = staged.baseline
         refreshSaveState()
@@ -1002,6 +1039,8 @@ final class Workspace: ObservableObject {
     }
 
     private func stopAndCleanAudio() {
+        for transport in preparedPlayers.values { transport.stop() }
+        preparedPlayers.removeAll()
         player?.stop(); player = nil; playing = false
         if let prepared { try? FileManager.default.removeItem(at: prepared.directory) }
         prepared = nil
