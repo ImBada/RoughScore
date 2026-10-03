@@ -88,7 +88,14 @@ final class Workspace: ObservableObject {
     private struct PreparedPlayer {
         let transport: any AudioPlayerTransport
         let volume: Float
+        var warmedRate: Float? = nil
+        var scheduledEpoch: Double? = nil
     }
+    private struct ScheduledStart {
+        let epoch: Double
+        let position: Double
+    }
+    private var scheduledStart: ScheduledStart?
     private var preparedPlayers: [ListeningSource: PreparedPlayer] = [:]
     private var timer: Timer?
     private var analysisTask: Task<Void, Never>?
@@ -187,15 +194,15 @@ final class Workspace: ObservableObject {
         return launchLoad(.startup, operation: operation)
     }
 
-    private func tick() {
+    func tick() {
         guard playing, let player else { return }
-        if looping && player.currentTime >= loopEnd {
+        if looping && livePlayerTime(player) >= loopEnd {
             startPlayers(at: loopStart)
         } else if !player.isPlaying {
             pausePlayers()
             playing = false
         }
-        cursor = boundedPlaybackTime(player.currentTime)
+        cursor = boundedPlaybackTime(livePlayerTime(player))
         if followScore && selectedID == nil && positionDrag == nil { followScoreCursor() }
         if selectedID == nil && positionDrag == nil && (cursor >= windowEnd || cursor < windowStart) {
             windowStart = max(0, min(project.duration - min(windowLength, project.duration), floor(cursor / windowLength) * windowLength))
@@ -252,7 +259,7 @@ final class Workspace: ObservableObject {
         guard canEdit, let player else { return }
         if playing {
             pausePlayers()
-            cursor = boundedPlaybackTime(player.currentTime)
+            cursor = boundedPlaybackTime(livePlayerTime(player))
             playing = false
         } else {
             if looping && (cursor < loopStart || cursor >= loopEnd) { seek(loopStart) }
@@ -260,15 +267,40 @@ final class Workspace: ObservableObject {
         }
     }
 
+    /// AV currentTime may project behind the seek while a future device start is queued.
+    /// That queued transport has not consumed any song frames yet; its live position is the anchor.
+    private func livePlayerTime(_ transport: (any AudioPlayerTransport)?) -> Double {
+        guard let transport else { return cursor }
+        if let pending = scheduledStart {
+            if transport.deviceCurrentTime < pending.epoch { return pending.position }
+            let time = transport.currentTime
+            if time < pending.position { return pending.position }
+            scheduledStart = nil
+            return time
+        }
+        return transport.currentTime
+    }
+
     private func pausePlayers() {
+        let pending = scheduledStart
+        let restoreAnchor = pending.map { pending in
+            player.map { $0.deviceCurrentTime < pending.epoch || $0.currentTime < pending.position } ?? false
+        } ?? false
         player?.pause()
         for cached in preparedPlayers.values where cached.transport !== player { cached.transport.pause() }
+        if restoreAnchor, let pending {
+            for cached in preparedPlayers.values { cached.transport.currentTime = pending.position }
+        }
+        for (value, var cached) in preparedPlayers {
+            cached.scheduledEpoch = nil; preparedPlayers[value] = cached
+        }
+        scheduledStart = nil
     }
 
     private func updatePlaybackRate() {
         let resume = playing
         pausePlayers()
-        if resume, let player { cursor = boundedPlaybackTime(player.currentTime) }
+        if resume, let player { cursor = boundedPlaybackTime(livePlayerTime(player)) }
         for cached in preparedPlayers.values where cached.transport.rate != rate { cached.transport.rate = rate }
         if resume { startPlayers(at: cursor) }
     }
@@ -297,17 +329,42 @@ final class Workspace: ObservableObject {
         guard !closed, projectIdentity == identity, self.prepared?.directory == prepared.directory,
               self.player === player else { return }
         pausePlayers()
-        for (value, cached) in preparedPlayers {
+        // prepareToPlay alone can leave a cold rate renderer inside the first play call. Warm it
+        // once per rate while muted, before positioning any channel at the common starting frame.
+        for (value, var cached) in preparedPlayers {
             if cached.transport.rate != rate { cached.transport.rate = rate }
+            cached.transport.volume = 0
+            if cached.warmedRate != rate {
+                cached.transport.currentTime = 0
+                if cached.transport.play() { cached.warmedRate = rate }
+                cached.transport.pause()
+                preparedPlayers[value] = cached
+            }
+        }
+        guard !closed, projectIdentity == identity, self.prepared?.directory == prepared.directory,
+              self.player === player else { return }
+        var ready: [ListeningSource: PreparedPlayer] = [:]
+        for (value, cached) in preparedPlayers {
             cached.transport.currentTime = time
             cached.transport.volume = value == source ? cached.volume : 0
+            // A seek invalidates render preparation; finish it before choosing the shared epoch.
+            if cached.warmedRate == rate && cached.transport.prepareToPlay() { ready[value] = cached }
         }
-        // Leave time for AV's cold render setup; every prepared player uses this same hardware epoch.
+        guard ready[source] != nil else {
+            playing = false; error = AudioIssue.playbackFailed.localizedDescription
+            return
+        }
         let epoch = player.deviceCurrentTime + 0.25
-        for (value, cached) in preparedPlayers where value != source {
-            _ = cached.transport.play(atTime: epoch)
+        for (value, var cached) in ready where value != source {
+            cached.scheduledEpoch = cached.transport.play(atTime: epoch) && cached.transport.isPlaying ? epoch : nil
+            if cached.scheduledEpoch == nil { cached.transport.pause() }
+            preparedPlayers[value] = cached
         }
         playing = player.play(atTime: epoch) && player.isPlaying
+        if playing, var cached = preparedPlayers[source] {
+            cached.scheduledEpoch = epoch; preparedPlayers[source] = cached
+            scheduledStart = ScheduledStart(epoch: epoch, position: time)
+        }
         cursor = time
         if !playing {
             pausePlayers()
@@ -327,17 +384,33 @@ final class Workspace: ObservableObject {
             let identity = projectIdentity
             do {
                 // Prepare before sampling the clock: decoding/setup must not freeze or rewind the old player.
-                let cached = try cachedPlayer(for: value, audio: prepared)
+                var cached = try cachedPlayer(for: value, audio: prepared)
                 let destination = cached.transport
                 let old = player
-                var sampledTime = old?.currentTime ?? cursor
+                let oldDeviceBefore = old?.deviceCurrentTime ?? destination.deviceCurrentTime
+                var sampledTime = livePlayerTime(old)
+                let oldDeviceAfter = old?.deviceCurrentTime ?? destination.deviceCurrentTime
                 var liveTime = boundedPlaybackTime(sampledTime)
                 var loopWrap = looping && sampledTime.isFinite && sampledTime >= loopEnd
                 var resume = playing && (old?.isPlaying == true || loopWrap)
                 if destination.rate != rate { destination.rate = rate }
                 let target = loopWrap ? loopStart : liveTime
-                let aligned = destination.isPlaying && abs(destination.currentTime - target) <= 0.015
+                let newDeviceBefore = destination.deviceCurrentTime
+                let destinationTime = destination.currentTime
+                let newDeviceAfter = destination.deviceCurrentTime
+                let elapsedMinimum = max(0, newDeviceBefore - oldDeviceAfter)
+                let elapsedMaximum = max(0, newDeviceAfter - oldDeviceBefore)
+                // A native position read can sample anywhere within its device-clock bracket.
+                // Compare the projected interval, rather than pretending either getter's completion
+                // timestamp is the exact sample instant and mistaking elapsed progress for drift.
+                let queuedAtAnchor = scheduledStart.map { pending in
+                    cached.scheduledEpoch == pending.epoch
+                } ?? false
+                let aligned = destination.isPlaying && (queuedAtAnchor ||
+                    (destinationTime >= target + elapsedMinimum * Double(rate) - 0.015 &&
+                     destinationTime <= target + elapsedMaximum * Double(rate) + 0.015))
                 if resume && !aligned {
+                    cached.scheduledEpoch = nil; preparedPlayers[value] = cached
                     destination.volume = 0
                     destination.currentTime = target
                     if !destination.isPlaying {
@@ -348,7 +421,7 @@ final class Workspace: ObservableObject {
                         }
                         // Cold recovery after an earlier inactive-channel failure still samples the old
                         // live clock after warm-up. Normal switches reuse the running common-clock group.
-                        sampledTime = old?.currentTime ?? liveTime
+                        sampledTime = livePlayerTime(old)
                         liveTime = boundedPlaybackTime(sampledTime)
                         loopWrap = looping && sampledTime.isFinite && sampledTime >= loopEnd
                         resume = playing && (old?.isPlaying == true || loopWrap)
@@ -368,6 +441,7 @@ final class Workspace: ObservableObject {
                       self.prepared?.directory == prepared.directory else {
                     destination.pause(); throw CancellationError()
                 }
+                if scheduledStart != nil && cached.scheduledEpoch != scheduledStart?.epoch { scheduledStart = nil }
                 old?.volume = 0
                 destination.volume = cached.volume
                 if !resume { destination.pause() }
@@ -1117,7 +1191,7 @@ final class Workspace: ObservableObject {
 
     private func stopAndCleanAudio() {
         for cached in preparedPlayers.values { cached.transport.stop() }
-        preparedPlayers.removeAll()
+        preparedPlayers.removeAll(); scheduledStart = nil
         player?.stop(); player = nil; playing = false
         if let prepared { try? FileManager.default.removeItem(at: prepared.directory) }
         prepared = nil

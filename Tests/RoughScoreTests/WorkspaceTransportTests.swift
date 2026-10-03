@@ -5,14 +5,25 @@ import Testing
 
 @MainActor
 private final class TestPlayer: AudioPlayerTransport {
-    var currentTime = 0.0
+    private var storedTime = 0.0
+    var timeRead: (() -> Double)?
+    var seekCount = 0
+    var currentTime: Double {
+        get { timeRead?() ?? storedTime }
+        set { seekCount += 1; storedTime = newValue }
+    }
     var rate: Float = 1
     var volume: Float = 1
     var enableRate = false
     var isPlaying = false
     var deviceCurrentTime = 100.0
     var scheduledEpochs: [Double] = []
-    func play(atTime time: TimeInterval) -> Bool { scheduledEpochs.append(time); return play() }
+    var advancesDeviceOnSchedule = true
+    func play(atTime time: TimeInterval) -> Bool {
+        scheduledEpochs.append(time)
+        if advancesDeviceOnSchedule { deviceCurrentTime = time }
+        return play()
+    }
     var prepares = 0
     var playTimes: [Double] = []
     var preparationSucceeds = true
@@ -85,7 +96,53 @@ struct WorkspaceTransportTests {
         #expect(f.stereo.currentTime == 4.083 && w.playing)
         f.stereo.currentTime = 4.217; w.switchSource(.left)
         #expect(f.left.currentTime == 4.217 && w.playing)
-        #expect(f.constructions.count == 3 && f.left.prepares == 1 && f.stereo.prepares == 1)
+        #expect(f.constructions.count == 3 && f.left.prepares == 2 && f.stereo.prepares == 2)
+    }
+
+    @Test func pendingScheduledSeekSourceAndPauseKeepAnchorInsteadOfNativePreroll() async throws {
+        let f = try TransportFixture(); defer { f.clean() }
+        let w = try await f.loaded(); defer { w.shutdown() }
+        for player in [f.stereo, f.left, f.right] { player.advancesDeviceOnSchedule = false }
+        w.seek(2); w.togglePlayback()
+        for player in [f.stereo, f.left, f.right] { player.currentTime = 1.86 }
+        let seeks = f.left.seekCount
+        w.tick(); #expect(w.cursor == 2 && w.playing)
+        w.switchSource(.left)
+        #expect(w.cursor == 2 && w.playing && f.left.seekCount == seeks)
+        w.togglePlayback()
+        #expect(!w.playing && w.cursor == 2 && [f.stereo, f.left, f.right].allSatisfy { $0.currentTime == 2 && !$0.isPlaying })
+        w.togglePlayback()
+        for player in [f.stereo, f.left, f.right] { player.deviceCurrentTime = 100.25; player.currentTime = 2.213 }
+        w.switchSource(.right)
+        #expect(w.cursor == 2.213 && w.playing)
+    }
+
+    @Test func healthyAlignedGroupChangesOnlyGainsWithoutSeekOrResume() async throws {
+        let f = try TransportFixture(); defer { f.clean() }
+        let w = try await f.loaded(); defer { w.shutdown() }
+        w.seek(2); w.togglePlayback()
+        for player in [f.stereo, f.left, f.right] { player.currentTime = 2.327 }
+        let seeks = [f.stereo, f.left, f.right].map(\.seekCount)
+        let plays = [f.stereo, f.left, f.right].map { $0.playTimes.count }
+        for source in [ListeningSource.left, .right, .stereo, .left] { w.switchSource(source) }
+        #expect(w.cursor == 2.327 && w.playing && w.source == .left)
+        #expect([f.stereo, f.left, f.right].map(\.seekCount) == seeks)
+        #expect([f.stereo, f.left, f.right].map { $0.playTimes.count } == plays)
+        #expect(f.left.volume == 1 && f.stereo.volume == 0 && f.right.volume == 0)
+        #expect(f.constructions.count == 3)
+    }
+
+    @Test func laterDestinationClockReadDoesNotMistakeHardwareProgressForDrift() async throws {
+        let f = try TransportFixture(); defer { f.clean() }
+        let w = try await f.loaded(); defer { w.shutdown() }
+        w.rate = 0.5; w.seek(2); w.togglePlayback()
+        f.stereo.currentTime = 2.327
+        let seeks = f.left.seekCount
+        // Destination getter arrives200ms later on the same device clock at0.5x.
+        f.left.timeRead = { f.left.deviceCurrentTime = f.stereo.deviceCurrentTime + 0.2; return 2.427 }
+        w.switchSource(.left)
+        #expect(w.cursor == 2.327 && w.playing && w.source == .left)
+        #expect(f.left.seekCount == seeks && f.left.currentTime == 2.427)
     }
 
     @Test func preparationSamplesPausedLiveClockAndGroupControlsShareEpochRateSeekAndPause() async throws {

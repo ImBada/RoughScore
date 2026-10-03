@@ -93,6 +93,8 @@ struct AudioTests {
         var maximumPlayerSeekRewind = 0.0
         var maximumSeekReadbackError = 0.0
         var maximumCutoverDifference = 0.0
+        var correctiveSeeks = 0
+        var healthyGainSwitches = 0
         for rate: Float in [0.5, 0.75, 1] {
             workspace.rate = rate
             workspace.seek(0.5)
@@ -103,7 +105,7 @@ struct AudioTests {
                 let published = workspace.cursor
                 // No UI timer: wait for the scheduled native group to advance beyond the published cursor.
                 for _ in 0..<50 {
-                    if old.currentTime - published >= 0.04 { break }
+                    if old.native.deviceCurrentTime >= (old.scheduledEpoch ?? 0) && old.currentTime - published >= 0.04 { break }
                     try await Task.sleep(for: .milliseconds(20))
                 }
                 let liveBefore = old.currentTime
@@ -113,11 +115,16 @@ struct AudioTests {
                 old.beforeVolumeChange = {
                     guard let destination = capture.players[prepared.url(for: source)] else { return }
                     let started = ProcessInfo.processInfo.systemUptime
+                    cutover.oldDeviceBefore = old.native.deviceCurrentTime
                     cutover.oldTime = old.native.currentTime
+                    cutover.oldDeviceAfter = old.native.deviceCurrentTime
+                    cutover.newDeviceBefore = destination.native.deviceCurrentTime
                     cutover.destinationTime = destination.native.currentTime
+                    cutover.newDeviceAfter = destination.native.deviceCurrentTime
                     cutover.readElapsed = ProcessInfo.processInfo.systemUptime - started
                 }
                 let seeksBefore = capture.players[prepared.url(for: source)]?.seekCount
+                let readsBefore = capture.players[prepared.url(for: source)]?.readTimes.count ?? 0
                 let switchStarted = ProcessInfo.processInfo.systemUptime
                 workspace.switchSource(source)
                 old.beforeVolumeChange = nil
@@ -132,26 +139,77 @@ struct AudioTests {
                 // Allow backend seek quantization below a UI tick and real time spent inside AV calls.
                 #expect(destination.rate == rate && destinationTime >= liveBefore - 0.015)
                 #expect(destinationTime <= workspace.cursor + switchElapsed * Double(rate) + 0.015)
-                // A normal source switch changes gains on the already aligned running native group.
-                // No new seek or play is allowed at this boundary; shared-start readback remains frame exact.
+                // Aligned channels change gains only. If native rate-renderer phase drifts, the
+                // corrective seek must use this OLD live sample, never the published cursor.
                 let seek = try #require(destination.lastSeek)
                 let readback = try #require(destination.seekReadback)
                 let sampledOld = try #require(old.lastLiveRead)
                 maximumSeekReadbackError = max(maximumSeekReadbackError, abs(readback - seek))
-                #expect(destination.seekCount == seeksBefore && workspace.cursor == sampledOld)
+                print("Pre-guard old=\(String(describing: old.readSamples.last)) new=\(destination.readSamples[readsBefore]) oldDevice=\(String(describing: old.lastDeviceRead)) newDevice=\(String(describing: destination.lastDeviceRead)) corrective=\(destination.seekCount != seeksBefore)")
+                let oldSample = try #require(old.readSamples.last)
+                let newSample = destination.readSamples[readsBefore]
+                let projectedMinimum = oldSample.position + max(0, newSample.before - oldSample.after) * Double(rate)
+                let projectedMaximum = oldSample.position + max(0, newSample.after - oldSample.before) * Double(rate)
+                if newSample.position >= projectedMinimum - 0.015 && newSample.position <= projectedMaximum + 0.015 {
+                    healthyGainSwitches += 1
+                    #expect(destination.seekCount == seeksBefore)
+                }
+                if destination.seekCount != seeksBefore {
+                    correctiveSeeks += 1
+                    #expect(seek == sampledOld)
+                }
+                #expect(workspace.cursor == sampledOld)
                 #expect(abs(readback - seek) <= 1 / 44100.0)
                 let oldAtCutover = try #require(cutover.oldTime)
                 let newAtCutover = try #require(cutover.destinationTime)
                 maximumCutoverDifference = max(maximumCutoverDifference, abs(newAtCutover - oldAtCutover))
-                print("Active clock rate=\(rate) source=\(source) seek=\(seek) readback=\(readback) oldAtCutover=\(oldAtCutover) newAtCutover=\(newAtCutover) postResume=\(destinationTime) elapsed=\(switchElapsed) pairReadElapsed=\(cutover.readElapsed)")
+                print("Active clock rate=\(rate) source=\(source) seek=\(seek) readback=\(readback) oldAtCutover=\(oldAtCutover) newAtCutover=\(newAtCutover) postResume=\(destinationTime) elapsed=\(switchElapsed) pairReadElapsed=\(cutover.readElapsed) oldDeviceBracket=\(cutover.oldDeviceBefore)..\(cutover.oldDeviceAfter) newDeviceBracket=\(cutover.newDeviceBefore)..\(cutover.newDeviceAfter)")
                 #expect(abs(newAtCutover - oldAtCutover) <= 0.015 + cutover.readElapsed * Double(rate))
                 #expect(workspace.project == project && !workspace.looping)
             }
             workspace.togglePlayback()
             #expect(!workspace.playing)
         }
-        #expect(capture.constructions == 3)
-        print("Real Workspace transport: 18 switches at 0.5/0.75/1x, maximum cursor rewind=\(maximumRewind)s, backend seek rewind=\(maximumPlayerSeekRewind)s, shared-start seek readback error=\(maximumSeekReadbackError)s, active cutover difference=\(maximumCutoverDifference)s, 3 cached AVAudioPlayers, asymmetric decoded frames aligned")
+        // Actual queued native currentTime can project behind the requested seek. Immediate source
+        // changes and pause must retain the pending anchor, including short-loop re-anchors.
+        for rate: Float in [0.5, 0.75, 1] {
+            workspace.rate = rate
+            workspace.seek(0.5); workspace.togglePlayback()
+            workspace.seek(2); workspace.tick()
+            #expect(workspace.cursor >= 2 && workspace.playing)
+            let old = try #require(capture.players[prepared.url(for: workspace.source)])
+            print("Pending native rate=\(rate) requested=2 raw=\(old.native.currentTime) device=\(old.native.deviceCurrentTime)")
+            workspace.switchSource(.left)
+            #expect(workspace.cursor >= 2 && workspace.playing)
+            workspace.switchSource(.right)
+            #expect(workspace.cursor >= 2 && workspace.playing)
+            workspace.seek(1.25); workspace.tick()
+            #expect(workspace.cursor >= 1.25 && workspace.playing)
+            let changedRate: Float = rate == 1 ? 0.5 : rate == 0.5 ? 0.75 : 1
+            workspace.rate = changedRate; workspace.tick()
+            #expect(workspace.cursor >= 1.25 && workspace.rate == changedRate && workspace.playing)
+            workspace.seek(2.5); workspace.togglePlayback()
+            #expect(abs(workspace.cursor - 2.5) < 1 / 44100.0 && !workspace.playing)
+            workspace.rate = rate
+            workspace.switchSource(.stereo)
+            #expect(abs(workspace.cursor - 2.5) < 1 / 44100.0 && !workspace.playing)
+            workspace.setLoop(from: 2.5, to: 2.55); workspace.togglePlayback()
+            workspace.switchSource(.left); workspace.tick()
+            #expect(workspace.looping && workspace.loopStart == 2.5 && workspace.loopEnd == 2.55)
+            #expect(workspace.cursor >= 2.5 && workspace.cursor < 2.55 && workspace.playing)
+            let loopPlayer = try #require(capture.players[prepared.url(for: workspace.source)])
+            for _ in 0..<60 {
+                if loopPlayer.native.deviceCurrentTime >= (loopPlayer.scheduledEpoch ?? 0) && loopPlayer.native.currentTime >= workspace.loopEnd { break }
+                try await Task.sleep(for: .milliseconds(10))
+            }
+            workspace.tick() // real native loop boundary re-anchors the production timer path
+            #expect(workspace.cursor >= 2.5 && workspace.cursor < 2.55 && workspace.playing)
+            workspace.switchSource(.stereo)
+            #expect(workspace.cursor >= 2.5 && workspace.cursor < 2.55 && workspace.looping)
+            workspace.togglePlayback(); workspace.looping = false
+        }
+        #expect(capture.constructions == 3 && healthyGainSwitches > 0 && workspace.project == project)
+        print("Real Workspace transport: 18 switches at 0.5/0.75/1x, maximum cursor rewind=\(maximumRewind)s, backend seek rewind=\(maximumPlayerSeekRewind)s, shared-start seek readback error=\(maximumSeekReadbackError)s, active cutover difference=\(maximumCutoverDifference)s, corrective seeks=\(correctiveSeeks), healthy gain-only switches=\(healthyGainSwitches), 3 cached AVAudioPlayers, asymmetric decoded frames aligned")
     }
 
     private func impulseFixture() throws -> URL {
@@ -213,9 +271,20 @@ private final class ObservedAVPlayer: AudioPlayerTransport {
     var seekCount = 0
     var seekReadback: Double?
     var lastLiveRead: Double?
+    var readTimes: [Double] = []
+    var readSamples: [NativeClockSample] = []
+    var lastDeviceRead: Double?
+    var scheduledEpoch: Double?
     init(_ native: AVAudioPlayer) { self.native = native }
     var currentTime: Double {
-        get { let time = native.currentTime; lastLiveRead = time; return time }
+        get {
+            let before = native.deviceCurrentTime
+            let time = native.currentTime
+            let after = native.deviceCurrentTime
+            lastLiveRead = time; readTimes.append(time)
+            readSamples.append(NativeClockSample(position: time, before: before, after: after))
+            return time
+        }
         set { seekCount += 1; lastSeek = newValue; native.currentTime = newValue; seekReadback = native.currentTime }
     }
     var rate: Float { get { native.rate } set { native.rate = newValue } }
@@ -225,8 +294,16 @@ private final class ObservedAVPlayer: AudioPlayerTransport {
     var isPlaying: Bool { native.isPlaying }
     func prepareToPlay() -> Bool { native.prepareToPlay() }
     func play() -> Bool { native.play() }
-    var deviceCurrentTime: Double { native.deviceCurrentTime }
-    func play(atTime time: TimeInterval) -> Bool { native.play(atTime: time) }
+    var deviceCurrentTime: Double { let time = native.deviceCurrentTime; lastDeviceRead = time; return time }
+    func play(atTime time: TimeInterval) -> Bool {
+        let before = native.deviceCurrentTime
+        let result = native.play(atTime: time)
+        let after = native.deviceCurrentTime
+        if result { scheduledEpoch = time }
+        print("Native scheduled start rate=\(native.rate) epoch=\(time) before=\(before) after=\(after) lead=\(time - before)")
+        #expect(before < time && after < time)
+        return result
+    }
     func pause() { native.pause() }
     func stop() { native.stop() }
 }
@@ -236,4 +313,13 @@ private final class ActiveClockPair {
     var oldTime: Double?
     var destinationTime: Double?
     var readElapsed = 0.0
+    var oldDeviceBefore = 0.0, oldDeviceAfter = 0.0
+    var newDeviceBefore = 0.0, newDeviceAfter = 0.0
+}
+
+private struct NativeClockSample: CustomStringConvertible {
+    let position: Double
+    let before: Double
+    let after: Double
+    var description: String { "position=\(position),device=\(before)..\(after)" }
 }
