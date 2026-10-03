@@ -153,3 +153,10 @@ Both actual SDK CI jobs and independent exact-head/base approval are required
 before the authorized source integration owner or root merges. Menu/system
 clipboard/print integration, selection gestures, live waveform rendering and full
 #15 UI acceptance remain open and are not claimed by this prerequisite.
+
+Final local verification on accepted main280592964ae21c970c199b1e934f28c3e63ea22f:
+159 Swift tests in20 suites passed, including11 focused ExportCoreTests; release
+build passed;33 evaluator and7 CI-helper Python tests passed. Only the five new
+reserved core/test/doc files changed. The three final generated PDFs and latest
+page-image QA are recorded in the task report with hashes; they are examples,
+not a shipped fixture or new product/media library.
