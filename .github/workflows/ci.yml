@@ -1,9 +1,7 @@
 name: CI
 
+# Manual-only to preserve GitHub Actions minutes; local tests remain available.
 on:
-  pull_request:
-  push:
-    branches: [main]
   workflow_dispatch:
 
 permissions:
