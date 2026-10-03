@@ -66,9 +66,10 @@ struct AudioTests {
         defer { try? FileManager.default.removeItem(at: url) }
         let capture = RealPlayerCapture()
         var services = WorkspaceServices.live
+        let factory = services.makePlayer
         services.makePlayer = { url in
-            let native = try AVAudioPlayer(contentsOf: url)
-            native.volume = 0 // exercise the actual clock without emitting test audio
+            let native = try #require(factory(url) as? AudioEnginePlayer)
+            native.graph.engine.mainMixerNode.outputVolume = 0
             let player = ObservedAVPlayer(native)
             capture.players[url] = player
             capture.constructions += 1
@@ -125,6 +126,7 @@ struct AudioTests {
                 }
                 let seeksBefore = capture.players[prepared.url(for: source)]?.seekCount
                 let readsBefore = capture.players[prepared.url(for: source)]?.readTimes.count ?? 0
+                let oldReadsBefore = old.readSamples.count
                 let switchStarted = ProcessInfo.processInfo.systemUptime
                 workspace.switchSource(source)
                 old.beforeVolumeChange = nil
@@ -145,8 +147,8 @@ struct AudioTests {
                 let readback = try #require(destination.seekReadback)
                 let sampledOld = try #require(old.lastLiveRead)
                 maximumSeekReadbackError = max(maximumSeekReadbackError, abs(readback - seek))
-                print("Pre-guard old=\(String(describing: old.readSamples.last)) new=\(destination.readSamples[readsBefore]) oldDevice=\(String(describing: old.lastDeviceRead)) newDevice=\(String(describing: destination.lastDeviceRead)) corrective=\(destination.seekCount != seeksBefore)")
-                let oldSample = try #require(old.readSamples.last)
+                print("Pre-guard old=\(old.readSamples[oldReadsBefore]) new=\(destination.readSamples[readsBefore]) oldDevice=\(String(describing: old.lastDeviceRead)) newDevice=\(String(describing: destination.lastDeviceRead)) corrective=\(destination.seekCount != seeksBefore)")
+                let oldSample = old.readSamples[oldReadsBefore]
                 let newSample = destination.readSamples[readsBefore]
                 let projectedMinimum = oldSample.position + max(0, newSample.before - oldSample.after) * Double(rate)
                 let projectedMaximum = oldSample.position + max(0, newSample.after - oldSample.before) * Double(rate)
@@ -209,7 +211,7 @@ struct AudioTests {
             workspace.togglePlayback(); workspace.looping = false
         }
         #expect(capture.constructions == 3 && healthyGainSwitches > 0 && workspace.project == project)
-        print("Real Workspace transport: 18 switches at 0.5/0.75/1x, maximum cursor rewind=\(maximumRewind)s, backend seek rewind=\(maximumPlayerSeekRewind)s, shared-start seek readback error=\(maximumSeekReadbackError)s, active cutover difference=\(maximumCutoverDifference)s, corrective seeks=\(correctiveSeeks), healthy gain-only switches=\(healthyGainSwitches), 3 cached AVAudioPlayers, asymmetric decoded frames aligned")
+        print("Real Workspace transport: 18 switches at 0.5/0.75/1x, maximum cursor rewind=\(maximumRewind)s, backend seek rewind=\(maximumPlayerSeekRewind)s, shared-start seek readback error=\(maximumSeekReadbackError)s, active cutover difference=\(maximumCutoverDifference)s, corrective seeks=\(correctiveSeeks), healthy gain-only switches=\(healthyGainSwitches), 3 cached source ports / one native rate renderer, asymmetric decoded frames aligned")
     }
 
     private func impulseFixture() throws -> URL {
@@ -266,7 +268,7 @@ private final class RealPlayerCapture {
 /// Records the application's actual boundary and delegates every operation to a real AVAudioPlayer.
 @MainActor
 private final class ObservedAVPlayer: AudioPlayerTransport {
-    let native: AVAudioPlayer
+    let native: AudioEnginePlayer
     var lastSeek: Double?
     var seekCount = 0
     var seekReadback: Double?
@@ -275,7 +277,8 @@ private final class ObservedAVPlayer: AudioPlayerTransport {
     var readSamples: [NativeClockSample] = []
     var lastDeviceRead: Double?
     var scheduledEpoch: Double?
-    init(_ native: AVAudioPlayer) { self.native = native }
+    init(_ native: AudioEnginePlayer) { self.native = native }
+    var sharedClockID: UUID? { native.sharedClockID }
     var currentTime: Double {
         get {
             let before = native.deviceCurrentTime

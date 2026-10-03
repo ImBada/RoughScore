@@ -298,6 +298,11 @@ final class Workspace: ObservableObject {
     }
 
     private func updatePlaybackRate() {
+        if let player, player.sharedClockID != nil {
+            player.rate = rate
+            if playing { cursor = boundedPlaybackTime(livePlayerTime(player)) }
+            return
+        }
         let resume = playing
         pausePlayers()
         if resume, let player { cursor = boundedPlaybackTime(livePlayerTime(player)) }
@@ -329,32 +334,18 @@ final class Workspace: ObservableObject {
         guard !closed, projectIdentity == identity, self.prepared?.directory == prepared.directory,
               self.player === player else { return }
         pausePlayers()
-        // prepareToPlay alone can leave a cold rate renderer inside the first play call. Warm it
-        // once per rate while muted, before positioning any channel at the common starting frame.
-        for (value, var cached) in preparedPlayers {
-            if cached.transport.rate != rate { cached.transport.rate = rate }
-            cached.transport.volume = 0
-            if cached.warmedRate != rate {
-                cached.transport.currentTime = 0
-                if cached.transport.play() { cached.warmedRate = rate }
-                cached.transport.pause()
-                preparedPlayers[value] = cached
-            }
-        }
-        guard !closed, projectIdentity == identity, self.prepared?.directory == prepared.directory,
-              self.player === player else { return }
         var ready: [ListeningSource: PreparedPlayer] = [:]
         for (value, cached) in preparedPlayers {
+            if cached.transport.rate != rate { cached.transport.rate = rate }
             cached.transport.currentTime = time
             cached.transport.volume = value == source ? cached.volume : 0
-            // A seek invalidates render preparation; finish it before choosing the shared epoch.
-            if cached.warmedRate == rate && cached.transport.prepareToPlay() { ready[value] = cached }
+            if cached.transport.prepareToPlay() { ready[value] = cached }
         }
         guard ready[source] != nil else {
             playing = false; error = AudioIssue.playbackFailed.localizedDescription
             return
         }
-        let epoch = player.deviceCurrentTime + 0.25
+        let epoch = player.deviceCurrentTime + 0.02
         for (value, var cached) in ready where value != source {
             cached.scheduledEpoch = cached.transport.play(atTime: epoch) && cached.transport.isPlaying ? epoch : nil
             if cached.scheduledEpoch == nil { cached.transport.pause() }
@@ -406,13 +397,20 @@ final class Workspace: ObservableObject {
                 let queuedAtAnchor = scheduledStart.map { pending in
                     cached.scheduledEpoch == pending.epoch
                 } ?? false
-                let aligned = destination.isPlaying && (queuedAtAnchor ||
+                let sameRenderClock = old?.sharedClockID != nil && old?.sharedClockID == destination.sharedClockID
+                // A shared graph cannot resume or seek one failed source without disturbing the
+                // running old source. Reject that destination while leaving the usable graph alone.
+                if sameRenderClock && resume && !destination.isPlaying { throw AudioIssue.playbackFailed }
+                let aligned = destination.isPlaying && (sameRenderClock || queuedAtAnchor ||
                     (destinationTime >= target + elapsedMinimum * Double(rate) - 0.015 &&
                      destinationTime <= target + elapsedMaximum * Double(rate) + 0.015))
                 if resume && !aligned {
                     cached.scheduledEpoch = nil; preparedPlayers[value] = cached
                     destination.volume = 0
-                    destination.currentTime = target
+                    sampledTime = livePlayerTime(old)
+                    liveTime = boundedPlaybackTime(sampledTime)
+                    loopWrap = looping && sampledTime.isFinite && sampledTime >= loopEnd
+                    destination.currentTime = loopWrap ? loopStart : liveTime
                     if !destination.isPlaying {
                         guard destination.play() && destination.isPlaying else {
                             destination.pause()
@@ -430,6 +428,12 @@ final class Workspace: ObservableObject {
                 } else if !resume {
                     pausePlayers()
                     destination.currentTime = target
+                } else {
+                    // Native getters may wait for a render quantum. The coherent destination keeps
+                    // advancing, so publish a fresh OLD live sample at the gain handover itself.
+                    sampledTime = livePlayerTime(old)
+                    liveTime = boundedPlaybackTime(sampledTime)
+                    loopWrap = looping && sampledTime.isFinite && sampledTime >= loopEnd
                 }
                 if loopWrap && resume {
                     // A switch may observe the loop boundary before the 30ms tick. Re-anchor every
@@ -1056,6 +1060,7 @@ final class Workspace: ObservableObject {
 
     private func preparePlayer(for staged: StagedWorkspace) throws -> (any AudioPlayerTransport)? {
         guard let audio = staged.audio else { return nil }
+        try services.prepareTransport(audio)
         let candidate = try services.makePlayer(audio.url(for: .stereo))
         candidate.enableRate = true; candidate.rate = rate
         candidate.currentTime = staged.isDemo ? 2 : 0

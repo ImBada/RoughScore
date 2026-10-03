@@ -15,6 +15,7 @@ protocol AudioPlayerTransport: AnyObject {
     var enableRate: Bool { get set }
     var isPlaying: Bool { get }
     var deviceCurrentTime: TimeInterval { get }
+    var sharedClockID: UUID? { get }
     func play(atTime time: TimeInterval) -> Bool
     func prepareToPlay() -> Bool
     func play() -> Bool
@@ -22,6 +23,7 @@ protocol AudioPlayerTransport: AnyObject {
     func stop()
 }
 
+extension AudioPlayerTransport { var sharedClockID: UUID? { nil } }
 extension AVAudioPlayer: AudioPlayerTransport {}
 
 struct PreparedAudio: Sendable {

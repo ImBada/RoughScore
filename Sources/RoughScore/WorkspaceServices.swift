@@ -12,6 +12,7 @@ struct WorkspaceServices: Sendable {
     var analyze: @Sendable (URL, Double) async throws -> AnalysisSummary
     var analyzerVersion = "apple-musicunderstanding-v1"
     var makePlayer: @MainActor @Sendable (URL) throws -> any AudioPlayerTransport
+    var prepareTransport: @MainActor @Sendable (PreparedAudio) throws -> Void = { _ in }
     var writeProject: @MainActor @Sendable (Data, URL) throws -> Void = { try $0.write(to: $1, options: .atomic) }
     var chooseSaveDestination: @MainActor @Sendable (String) -> URL? = { title in
         let panel = NSSavePanel()
@@ -24,7 +25,9 @@ struct WorkspaceServices: Sendable {
     var lastProject: @MainActor @Sendable () -> URL?
     var rememberProject: @MainActor @Sendable (URL) -> Void
 
-    static let live = WorkspaceServices(
+    @MainActor static var live: WorkspaceServices {
+        let factory = AudioEngineTransportFactory()
+        return WorkspaceServices(
         prepare: { try await AudioPreparation.prepare($0, progress: $1) },
         createDemo: { project in
             let task = Task.detached(priority: .userInitiated) { try AudioPreparation.createDemo(project: project) }
@@ -37,9 +40,11 @@ struct WorkspaceServices: Sendable {
             return try await withTaskCancellationHandler { try await task.value } onCancel: { task.cancel() }
         },
         analyze: { try await AppleMusicAnalysis.analyze($0, duration: $1) },
-        makePlayer: { try AVAudioPlayer(contentsOf: $0) },
+        makePlayer: { try factory.player($0) },
+        prepareTransport: { try factory.prepare($0) },
         fileExists: { FileManager.default.fileExists(atPath: $0.path) },
         lastProject: { UserDefaults.standard.string(forKey: "lastProjectPath").map { URL(fileURLWithPath: $0) } },
         rememberProject: { UserDefaults.standard.set($0.path, forKey: "lastProjectPath") }
-    )
+        )
+    }
 }
