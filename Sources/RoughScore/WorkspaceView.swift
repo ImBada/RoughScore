@@ -449,8 +449,8 @@ struct TabCanvas: View {
                 })
                 PointerTabNotes(workspace: workspace, events: workspace.visibleEvents, bounds: 48...(48 + max(1, width)),
                     position: { note in
-                        CGPoint(x: 48 + (note.time - workspace.windowStart) / span * width,
-                                y: Double(68 + (note.string - 1) * 32))
+                        let timeX: Double = 48 + (note.time - workspace.windowStart) / span * Double(width)
+                        return CGPoint(x: timeX, y: Double(68 + (note.string - 1) * 32))
                     }, destination: { note, translation in
                         (TimeBounds.timelineDragTime(note.time, start: workspace.windowStart, end: workspace.windowEnd, translation: translation.width, width: width) ?? note.time,
                          note.string + Int(round(translation.height / 32)))
