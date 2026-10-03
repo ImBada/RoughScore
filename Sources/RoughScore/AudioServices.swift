@@ -11,8 +11,11 @@ import MusicUnderstanding
 protocol AudioPlayerTransport: AnyObject {
     var currentTime: TimeInterval { get set }
     var rate: Float { get set }
+    var volume: Float { get set }
     var enableRate: Bool { get set }
     var isPlaying: Bool { get }
+    var deviceCurrentTime: TimeInterval { get }
+    func play(atTime time: TimeInterval) -> Bool
     func prepareToPlay() -> Bool
     func play() -> Bool
     func pause()

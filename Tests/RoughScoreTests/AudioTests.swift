@@ -67,8 +67,9 @@ struct AudioTests {
         let capture = RealPlayerCapture()
         var services = WorkspaceServices.live
         services.makePlayer = { url in
-            let player = try AVAudioPlayer(contentsOf: url)
-            player.volume = 0 // exercise the actual clock without emitting test audio
+            let native = try AVAudioPlayer(contentsOf: url)
+            native.volume = 0 // exercise the actual clock without emitting test audio
+            let player = ObservedAVPlayer(native)
             capture.players[url] = player
             capture.constructions += 1
             return player
@@ -90,6 +91,8 @@ struct AudioTests {
         let project = workspace.project
         var maximumRewind = 0.0
         var maximumPlayerSeekRewind = 0.0
+        var maximumSeekReadbackError = 0.0
+        var maximumCutoverDifference = 0.0
         for rate: Float in [0.5, 0.75, 1] {
             workspace.rate = rate
             workspace.seek(0.5)
@@ -98,12 +101,26 @@ struct AudioTests {
             for source in [ListeningSource.left, .right, .stereo, .right, .left, .stereo] {
                 let old = try #require(capture.players[prepared.url(for: workspace.source)])
                 let published = workspace.cursor
-                try await Task.sleep(for: .milliseconds(180)) // no UI timer: old clock deliberately advances
+                // No UI timer: wait for the scheduled native group to advance beyond the published cursor.
+                for _ in 0..<50 {
+                    if old.currentTime - published >= 0.04 { break }
+                    try await Task.sleep(for: .milliseconds(20))
+                }
                 let liveBefore = old.currentTime
                 #expect(liveBefore - published >= 0.03)
                 #expect(old.rate == rate && old.isPlaying)
+                let cutover = ActiveClockPair()
+                old.beforeVolumeChange = {
+                    guard let destination = capture.players[prepared.url(for: source)] else { return }
+                    let started = ProcessInfo.processInfo.systemUptime
+                    cutover.oldTime = old.native.currentTime
+                    cutover.destinationTime = destination.native.currentTime
+                    cutover.readElapsed = ProcessInfo.processInfo.systemUptime - started
+                }
+                let seeksBefore = capture.players[prepared.url(for: source)]?.seekCount
                 let switchStarted = ProcessInfo.processInfo.systemUptime
                 workspace.switchSource(source)
+                old.beforeVolumeChange = nil
                 let destination = try #require(capture.players[prepared.url(for: source)])
                 let destinationTime = destination.currentTime
                 let switchElapsed = ProcessInfo.processInfo.systemUptime - switchStarted
@@ -111,17 +128,30 @@ struct AudioTests {
                 let rewind = liveBefore - workspace.cursor
                 maximumRewind = max(maximumRewind, rewind)
                 #expect(rewind < 2 / 44100.0) // allow decoded-frame quantization, not a 30ms tick
-                #expect(workspace.source == source && workspace.playing && destination.isPlaying && !old.isPlaying)
+                #expect(workspace.source == source && workspace.playing && destination.isPlaying && old.isPlaying && old.volume == 0)
                 // Allow backend seek quantization below a UI tick and real time spent inside AV calls.
                 #expect(destination.rate == rate && destinationTime >= liveBefore - 0.015)
                 #expect(destinationTime <= workspace.cursor + switchElapsed * Double(rate) + 0.015)
+                // A normal source switch changes gains on the already aligned running native group.
+                // No new seek or play is allowed at this boundary; shared-start readback remains frame exact.
+                let seek = try #require(destination.lastSeek)
+                let readback = try #require(destination.seekReadback)
+                let sampledOld = try #require(old.lastLiveRead)
+                maximumSeekReadbackError = max(maximumSeekReadbackError, abs(readback - seek))
+                #expect(destination.seekCount == seeksBefore && workspace.cursor == sampledOld)
+                #expect(abs(readback - seek) <= 1 / 44100.0)
+                let oldAtCutover = try #require(cutover.oldTime)
+                let newAtCutover = try #require(cutover.destinationTime)
+                maximumCutoverDifference = max(maximumCutoverDifference, abs(newAtCutover - oldAtCutover))
+                print("Active clock rate=\(rate) source=\(source) seek=\(seek) readback=\(readback) oldAtCutover=\(oldAtCutover) newAtCutover=\(newAtCutover) postResume=\(destinationTime) elapsed=\(switchElapsed) pairReadElapsed=\(cutover.readElapsed)")
+                #expect(abs(newAtCutover - oldAtCutover) <= 0.015 + cutover.readElapsed * Double(rate))
                 #expect(workspace.project == project && !workspace.looping)
             }
             workspace.togglePlayback()
             #expect(!workspace.playing)
         }
         #expect(capture.constructions == 3)
-        print("Real Workspace transport: 18 switches at 0.5/0.75/1x, maximum cursor rewind=\(maximumRewind)s, backend seek rewind=\(maximumPlayerSeekRewind)s, 3 cached AVAudioPlayers, asymmetric decoded frames aligned")
+        print("Real Workspace transport: 18 switches at 0.5/0.75/1x, maximum cursor rewind=\(maximumRewind)s, backend seek rewind=\(maximumPlayerSeekRewind)s, shared-start seek readback error=\(maximumSeekReadbackError)s, active cutover difference=\(maximumCutoverDifference)s, 3 cached AVAudioPlayers, asymmetric decoded frames aligned")
     }
 
     private func impulseFixture() throws -> URL {
@@ -171,6 +201,39 @@ struct AudioTests {
 
 @MainActor
 private final class RealPlayerCapture {
-    var players: [URL: AVAudioPlayer] = [:]
+    var players: [URL: ObservedAVPlayer] = [:]
     var constructions = 0
+}
+
+/// Records the application's actual boundary and delegates every operation to a real AVAudioPlayer.
+@MainActor
+private final class ObservedAVPlayer: AudioPlayerTransport {
+    let native: AVAudioPlayer
+    var lastSeek: Double?
+    var seekCount = 0
+    var seekReadback: Double?
+    var lastLiveRead: Double?
+    init(_ native: AVAudioPlayer) { self.native = native }
+    var currentTime: Double {
+        get { let time = native.currentTime; lastLiveRead = time; return time }
+        set { seekCount += 1; lastSeek = newValue; native.currentTime = newValue; seekReadback = native.currentTime }
+    }
+    var rate: Float { get { native.rate } set { native.rate = newValue } }
+    var beforeVolumeChange: (() -> Void)?
+    var volume: Float { get { native.volume } set { beforeVolumeChange?(); native.volume = newValue } }
+    var enableRate: Bool { get { native.enableRate } set { native.enableRate = newValue } }
+    var isPlaying: Bool { native.isPlaying }
+    func prepareToPlay() -> Bool { native.prepareToPlay() }
+    func play() -> Bool { native.play() }
+    var deviceCurrentTime: Double { native.deviceCurrentTime }
+    func play(atTime time: TimeInterval) -> Bool { native.play(atTime: time) }
+    func pause() { native.pause() }
+    func stop() { native.stop() }
+}
+
+@MainActor
+private final class ActiveClockPair {
+    var oldTime: Double?
+    var destinationTime: Double?
+    var readElapsed = 0.0
 }

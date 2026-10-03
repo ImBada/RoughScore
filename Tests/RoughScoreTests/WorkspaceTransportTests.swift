@@ -7,8 +7,12 @@ import Testing
 private final class TestPlayer: AudioPlayerTransport {
     var currentTime = 0.0
     var rate: Float = 1
+    var volume: Float = 1
     var enableRate = false
     var isPlaying = false
+    var deviceCurrentTime = 100.0
+    var scheduledEpochs: [Double] = []
+    func play(atTime time: TimeInterval) -> Bool { scheduledEpochs.append(time); return play() }
     var prepares = 0
     var playTimes: [Double] = []
     var preparationSucceeds = true
@@ -69,12 +73,11 @@ struct WorkspaceTransportTests {
         let f = try TransportFixture(); defer { f.clean() }
         let w = try await f.loaded(); defer { w.shutdown() }
         w.rate = rate; w.seek(2); w.togglePlayback()
-        f.stereo.currentTime = 2.19 // deliberately ahead of the 30ms published cursor
-        f.duringConstruction = { f.stereo.currentTime += 0.137 }
+        f.stereo.currentTime = 2.327 // deliberately ahead of the 30ms published cursor
         w.switchSource(.left)
         #expect(f.left.currentTime == 2.327)
         #expect(w.cursor == 2.327 && w.rate == rate && f.left.rate == rate)
-        #expect(w.playing && f.left.isPlaying && !f.stereo.isPlaying)
+        #expect(w.playing && f.left.isPlaying && f.stereo.volume == 0)
         f.duringConstruction = nil
         f.left.currentTime = 3.213; w.switchSource(.right)
         #expect(f.right.currentTime == 3.213 && w.playing)
@@ -83,6 +86,26 @@ struct WorkspaceTransportTests {
         f.stereo.currentTime = 4.217; w.switchSource(.left)
         #expect(f.left.currentTime == 4.217 && w.playing)
         #expect(f.constructions.count == 3 && f.left.prepares == 1 && f.stereo.prepares == 1)
+    }
+
+    @Test func preparationSamplesPausedLiveClockAndGroupControlsShareEpochRateSeekAndPause() async throws {
+        let f = try TransportFixture(); defer { f.clean() }
+        let w = try await f.loaded(); defer { w.shutdown() }
+        w.seek(2); f.stereo.currentTime = 2.19
+        f.duringConstruction = { f.stereo.currentTime += 0.137 }
+        w.switchSource(.left)
+        #expect(w.cursor == 2.327 && f.left.currentTime == 2.327 && !w.playing)
+        f.duringConstruction = nil
+        w.togglePlayback()
+        #expect(f.stereo.scheduledEpochs.last == 100.25 && f.left.scheduledEpochs.last == 100.25)
+        #expect(f.right.scheduledEpochs.last == 100.25 && w.playing)
+        #expect(f.stereo.volume == 0 && f.left.volume == 1 && f.right.volume == 0)
+        f.left.currentTime = 3.213; w.rate = 0.75
+        #expect(w.cursor == 3.213 && w.playing && [f.stereo, f.left, f.right].allSatisfy { $0.rate == 0.75 && $0.currentTime == 3.213 })
+        w.seek(4.083)
+        #expect([f.stereo, f.left, f.right].allSatisfy { $0.currentTime == 4.083 && $0.isPlaying })
+        f.left.currentTime = 4.217; w.togglePlayback()
+        #expect(w.cursor == 4.217 && !w.playing && [f.stereo, f.left, f.right].allSatisfy { !$0.isPlaying })
     }
 
     @Test(arguments: ["construction", "preparation", "resume"])
@@ -94,11 +117,12 @@ struct WorkspaceTransportTests {
         w.updateSelected { $0.lane = .right; $0.length = .eighth; $0.tentative = true }
         w.save()
         w.updateSelected { $0.memo = "unsaved" }
-        w.rate = 0.75; w.seek(2); w.togglePlayback(); f.stereo.currentTime = 2.19
+        w.rate = 0.75; w.seek(2)
         let project = w.project, state = w.saveState, selection = w.selectedID
         if failure == "construction" { f.failURL = f.audio.left }
         if failure == "preparation" { f.left.preparationSucceeds = false }
         if failure == "resume" { f.left.playbackSucceeds = false }
+        w.togglePlayback(); f.stereo.currentTime = 2.19
         w.switchSource(.left)
         #expect(w.source == .stereo && w.playing && f.stereo.isPlaying && !f.left.isPlaying)
         #expect(w.error != nil && f.stereo.currentTime == 2.19)

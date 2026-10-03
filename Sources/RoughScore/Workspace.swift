@@ -21,7 +21,7 @@ final class Workspace: ObservableObject {
     @Published var loopEnd = 6.0
     @Published var looping = false
     @Published var playing = false
-    @Published var rate: Float = 1 { didSet { player?.rate = rate } }
+    @Published var rate: Float = 1 { didSet { if rate != oldValue { updatePlaybackRate() } } }
     @Published var showLengths = false
     @Published var snapToBeat = false
     @Published private(set) var busy = false
@@ -85,7 +85,11 @@ final class Workspace: ObservableObject {
     private var projectURL: URL?
     private var projectRevision: UInt64 = 0
     private var player: (any AudioPlayerTransport)?
-    private var preparedPlayers: [ListeningSource: any AudioPlayerTransport] = [:]
+    private struct PreparedPlayer {
+        let transport: any AudioPlayerTransport
+        let volume: Float
+    }
+    private var preparedPlayers: [ListeningSource: PreparedPlayer] = [:]
     private var timer: Timer?
     private var analysisTask: Task<Void, Never>?
     private var demoURL: URL?
@@ -186,9 +190,9 @@ final class Workspace: ObservableObject {
     private func tick() {
         guard playing, let player else { return }
         if looping && player.currentTime >= loopEnd {
-            player.currentTime = loopStart
-            if !player.isPlaying { playing = player.play() && player.isPlaying }
+            startPlayers(at: loopStart)
         } else if !player.isPlaying {
+            pausePlayers()
             playing = false
         }
         cursor = boundedPlaybackTime(player.currentTime)
@@ -202,7 +206,8 @@ final class Workspace: ObservableObject {
         guard let bounded = TimeBounds.clamp(time, duration: project.duration) else { return }
         cursor = bounded
         if looping && (cursor < loopStart || cursor >= loopEnd) { looping = false }
-        player?.currentTime = cursor
+        if playing { startPlayers(at: cursor) }
+        else { for cached in preparedPlayers.values { cached.transport.currentTime = cursor } }
         if cursor < windowStart || cursor >= windowEnd {
             windowStart = min(cursor, max(0, project.duration - windowLength))
         }
@@ -246,14 +251,67 @@ final class Workspace: ObservableObject {
     func togglePlayback() {
         guard canEdit, let player else { return }
         if playing {
-            player.pause()
+            pausePlayers()
             cursor = boundedPlaybackTime(player.currentTime)
             playing = false
         } else {
             if looping && (cursor < loopStart || cursor >= loopEnd) { seek(loopStart) }
-            player.currentTime = cursor
-            playing = player.play() && player.isPlaying
-            if !playing { error = AudioIssue.playbackFailed.localizedDescription }
+            startPlayers(at: cursor)
+        }
+    }
+
+    private func pausePlayers() {
+        player?.pause()
+        for cached in preparedPlayers.values where cached.transport !== player { cached.transport.pause() }
+    }
+
+    private func updatePlaybackRate() {
+        let resume = playing
+        pausePlayers()
+        if resume, let player { cursor = boundedPlaybackTime(player.currentTime) }
+        for cached in preparedPlayers.values where cached.transport.rate != rate { cached.transport.rate = rate }
+        if resume { startPlayers(at: cursor) }
+    }
+
+    private func cachedPlayer(for value: ListeningSource, audio: PreparedAudio) throws -> PreparedPlayer {
+        if let cached = preparedPlayers[value] { return cached }
+        let identity = projectIdentity
+        let transport = try services.makePlayer(audio.url(for: value))
+        transport.enableRate = true; transport.rate = rate
+        guard transport.prepareToPlay() else { throw AudioIssue.playbackFailed }
+        guard canEdit, projectIdentity == identity, prepared?.directory == audio.directory else { throw CancellationError() }
+        let cached = PreparedPlayer(transport: transport, volume: transport.volume)
+        preparedPlayers[value] = cached
+        return cached
+    }
+
+    /// All ready channels consume the same original-song frames on one native device clock.
+    /// Inactive channels stay muted and running, so a gain change requires no resume/seek rebuild.
+    private func startPlayers(at time: Double) {
+        guard let prepared, let player else { playing = false; return }
+        let identity = projectIdentity
+        for value in [ListeningSource.stereo, .left, .right] {
+            // A failed inactive channel must not prevent the usable selected transport from playing.
+            _ = try? cachedPlayer(for: value, audio: prepared)
+        }
+        guard !closed, projectIdentity == identity, self.prepared?.directory == prepared.directory,
+              self.player === player else { return }
+        pausePlayers()
+        for (value, cached) in preparedPlayers {
+            if cached.transport.rate != rate { cached.transport.rate = rate }
+            cached.transport.currentTime = time
+            cached.transport.volume = value == source ? cached.volume : 0
+        }
+        // Leave time for AV's cold render setup; every prepared player uses this same hardware epoch.
+        let epoch = player.deviceCurrentTime + 0.25
+        for (value, cached) in preparedPlayers where value != source {
+            _ = cached.transport.play(atTime: epoch)
+        }
+        playing = player.play(atTime: epoch) && player.isPlaying
+        cursor = time
+        if !playing {
+            pausePlayers()
+            error = AudioIssue.playbackFailed.localizedDescription
         }
     }
 
@@ -269,31 +327,50 @@ final class Workspace: ObservableObject {
             let identity = projectIdentity
             do {
                 // Prepare before sampling the clock: decoding/setup must not freeze or rewind the old player.
-                let destination: any AudioPlayerTransport
-                if let cached = preparedPlayers[value] { destination = cached }
-                else {
-                    destination = try services.makePlayer(prepared.url(for: value))
-                    destination.enableRate = true
-                    destination.rate = rate
-                    guard destination.prepareToPlay() else { throw AudioIssue.playbackFailed }
-                    guard canMutateNotes, projectIdentity == identity,
-                          self.prepared?.directory == prepared.directory else { throw CancellationError() }
-                    preparedPlayers[value] = destination
-                }
+                let cached = try cachedPlayer(for: value, audio: prepared)
+                let destination = cached.transport
                 let old = player
-                let sampledTime = old?.currentTime ?? cursor
-                let liveTime = boundedPlaybackTime(sampledTime)
-                let loopWrap = looping && sampledTime.isFinite && sampledTime >= loopEnd
-                let resume = playing && (old?.isPlaying == true || loopWrap)
-                destination.rate = rate
-                destination.currentTime = loopWrap ? loopStart : liveTime
-                // A failed destination never interrupts the usable old transport or commits UI state.
-                if resume && !(destination.play() && destination.isPlaying) {
-                    destination.pause()
-                    preparedPlayers.removeValue(forKey: value)
-                    throw AudioIssue.playbackFailed
+                var sampledTime = old?.currentTime ?? cursor
+                var liveTime = boundedPlaybackTime(sampledTime)
+                var loopWrap = looping && sampledTime.isFinite && sampledTime >= loopEnd
+                var resume = playing && (old?.isPlaying == true || loopWrap)
+                if destination.rate != rate { destination.rate = rate }
+                let target = loopWrap ? loopStart : liveTime
+                let aligned = destination.isPlaying && abs(destination.currentTime - target) <= 0.015
+                if resume && !aligned {
+                    destination.volume = 0
+                    destination.currentTime = target
+                    if !destination.isPlaying {
+                        guard destination.play() && destination.isPlaying else {
+                            destination.pause()
+                            preparedPlayers.removeValue(forKey: value)
+                            throw AudioIssue.playbackFailed
+                        }
+                        // Cold recovery after an earlier inactive-channel failure still samples the old
+                        // live clock after warm-up. Normal switches reuse the running common-clock group.
+                        sampledTime = old?.currentTime ?? liveTime
+                        liveTime = boundedPlaybackTime(sampledTime)
+                        loopWrap = looping && sampledTime.isFinite && sampledTime >= loopEnd
+                        resume = playing && (old?.isPlaying == true || loopWrap)
+                        destination.currentTime = loopWrap ? loopStart : liveTime
+                    }
+                } else if !resume {
+                    pausePlayers()
+                    destination.currentTime = target
                 }
-                old?.pause()
+                if loopWrap && resume {
+                    // A switch may observe the loop boundary before the 30ms tick. Re-anchor every
+                    // channel together so subsequent switches retain the same loop clock.
+                    startPlayers(at: loopStart)
+                    guard destination.isPlaying else { throw AudioIssue.playbackFailed }
+                }
+                guard canMutateNotes, projectIdentity == identity,
+                      self.prepared?.directory == prepared.directory else {
+                    destination.pause(); throw CancellationError()
+                }
+                old?.volume = 0
+                destination.volume = cached.volume
+                if !resume { destination.pause() }
                 player = destination
                 cursor = loopWrap ? loopStart : liveTime
                 playing = resume && destination.isPlaying
@@ -931,7 +1008,7 @@ final class Workspace: ObservableObject {
         loopStart = staged.isDemo ? 2 : 0; loopEnd = staged.isDemo ? 6 : min(project.duration, 4)
         looping = false; source = .stereo
         player = stagedPlayer
-        if let stagedPlayer { preparedPlayers[.stereo] = stagedPlayer }
+        if let stagedPlayer { preparedPlayers[.stereo] = PreparedPlayer(transport: stagedPlayer, volume: stagedPlayer.volume) }
         projectRevision &+= 1
         savedProject = staged.baseline
         refreshSaveState()
@@ -1039,7 +1116,7 @@ final class Workspace: ObservableObject {
     }
 
     private func stopAndCleanAudio() {
-        for transport in preparedPlayers.values { transport.stop() }
+        for cached in preparedPlayers.values { cached.transport.stop() }
         preparedPlayers.removeAll()
         player?.stop(); player = nil; playing = false
         if let prepared { try? FileManager.default.removeItem(at: prepared.directory) }
