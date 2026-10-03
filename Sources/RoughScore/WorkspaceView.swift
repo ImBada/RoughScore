@@ -419,7 +419,7 @@ struct TabCanvas: View {
                         let y = Double(68 + (string - 1) * 32)
                         var line = Path(); line.move(to: CGPoint(x: 48, y: y)); line.addLine(to: CGPoint(x: size.width - 30, y: y))
                         context.stroke(line, with: .color(.white.opacity(0.17)), lineWidth: string >= 4 ? 1.3 : 0.8)
-                        context.draw(Text(workspace.project.tuning[string - 1]).font(.system(size: 11, weight: .medium, design: .monospaced)).foregroundColor(Palette.secondary), at: CGPoint(x: 22, y: y))
+                        context.draw(Text(workspace.project.stringLabel(string)).font(.system(size: 11, weight: .medium, design: .monospaced)).foregroundColor(Palette.secondary), at: CGPoint(x: 22, y: y))
                     }
                     if let range = workspace.selectionRange,
                        workspace.project.events.contains(where: { workspace.selection.ids.contains($0.id) && $0.lane == workspace.lane }) {

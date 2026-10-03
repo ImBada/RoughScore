@@ -6,6 +6,23 @@ import SwiftUI
 import Testing
 @testable import RoughScore
 
+private actor PitchEstimateGate {
+    private var continuation: CheckedContinuation<DetectedPitch?, any Error>?
+    private var startedWaiter: CheckedContinuation<Void, Never>?
+    func estimate() async throws -> DetectedPitch? {
+        try await withCheckedThrowingContinuation {
+            continuation = $0; startedWaiter?.resume(); startedWaiter = nil
+        }
+    }
+    func started() async {
+        if continuation != nil { return }
+        await withCheckedContinuation { startedWaiter = $0 }
+    }
+    func finish() { continuation?.resume(returning: DetectedPitch(frequencyHz: 329.63, midi: 64)); continuation = nil }
+}
+
+@MainActor private final class TuningTextTargetBox { var target: NativeTextUndoTarget? }
+
 @MainActor
 @Suite(.serialized)
 struct TuningIntegrationTests {
@@ -134,10 +151,108 @@ struct TuningIntegrationTests {
         #expect(DetectedPitch(frequencyHz: .nan, midi: 64).nearestMIDI == nil)
     }
 
+    @Test func lateDetectionCannotPublishAfterSelectionTuningLoadOrShutdown() async throws {
+        let directory = try root(); defer { try? FileManager.default.removeItem(at: directory) }
+        let note = TabEvent(time: 0.2, lane: .left, string: 1)
+        let other = TabEvent(time: 0.4, lane: .right, string: 6)
+        for action in 0..<4 {
+            let gate = PitchEstimateGate()
+            var service = services(); service.detectPitch = { _, _ in try await gate.estimate() }
+            let workspace = Workspace(services: service); defer { workspace.shutdown() }
+            workspace.project = ScoreProject(duration: 2, events: [note, other])
+            let url = try AudioPreparation.createDemo(project: workspace.project)
+            defer { try? FileManager.default.removeItem(at: url) }
+            workspace.prepared = try await AudioPreparation.prepare(url)
+            workspace.select(note)
+            let task = try #require(workspace.detectSelectedPitch())
+            await gate.started()
+            switch action {
+            case 0: workspace.select(other)
+            case 1: #expect(workspace.setTuning(openMIDIPitches: TuningDefinition.dropD.openMIDIPitches, capo: 2))
+            case 2:
+                let document = directory.appendingPathComponent("replacement.roughscore")
+                try JSONEncoder().encode(ScoreProject(duration: 20)).write(to: document)
+                #expect(await workspace.loadProject(at: document)?.value == true)
+            default: workspace.shutdown()
+            }
+            let before = workspace.project
+            await gate.finish(); await task.value
+            #expect(workspace.detectedPitch == nil && !workspace.detectingPitch && workspace.pitchDetectionMessage.isEmpty)
+            #expect(workspace.project == before)
+        }
+    }
+
+    @Test func tuningHistoryCoexistsWithBulkSelectionCursorAndOneStepBatchUndo() throws {
+        let workspace = Workspace(services: services()); defer { workspace.shutdown() }
+        let notes = [TabEvent(time: 2, lane: .left, string: 6, fret: 0), TabEvent(time: 3, lane: .left, string: 5, fret: 2)]
+        workspace.project = ScoreProject(duration: 20, events: notes)
+        workspace.select(notes[0]); workspace.toggleSelection(notes[1])
+        workspace.placeSelectionCursor(10)
+        let selection = workspace.selectedIDs
+        #expect(workspace.setTuning(openMIDIPitches: TuningDefinition.dropD.openMIDIPitches, capo: 2))
+        #expect(workspace.selectedIDs == selection && workspace.cursor == 10 && workspace.project.events == notes)
+        #expect(workspace.offsetSelection(time: 1, strings: -1))
+        let tuned = workspace.project.tuningDefinition
+        workspace.undoEdit()
+        #expect(workspace.project.events == notes && workspace.project.tuningDefinition == tuned && workspace.selectedIDs == selection)
+        workspace.undoEdit()
+        #expect(workspace.project.tuningDefinition == nil && workspace.project.events == notes && workspace.cursor == 10)
+        workspace.redoEdit(); workspace.redoEdit()
+        #expect(workspace.project.tuningDefinition == tuned && workspace.selectedIDs == selection)
+        #expect(workspace.project.events.map(\.time) == [3, 4])
+    }
+
+    @Test func actualHostedTuningPresetCapoRejectApplyAndCandidateButtons() throws {
+        let directory = try root(); defer { try? FileManager.default.removeItem(at: directory) }
+        let workspace = Workspace(services: services()); defer { workspace.shutdown() }
+        let note = TabEvent(time: 2.123456789, lane: .right, string: 1, fret: 0, length: nil, tentative: true, memo: "native choice")
+        workspace.project = ScoreProject(duration: 20, events: [note])
+        #expect(workspace.save(to: directory.appendingPathComponent("native.roughscore")))
+        workspace.select(note)
+        let baseline = workspace.project
+        let tuning = NotePointerTests.Host(TuningEditor(workspace: workspace), height: 550)
+        defer { tuning.close() }
+        func button(_ host: NotePointerTests.Host, _ id: String) throws -> NSButton {
+            try #require(host.descendants().compactMap { $0 as? NSButton }.first { $0.identifier?.rawValue == id })
+        }
+        try button(tuning, "tuning-drop-d").performClick(nil); tuning.settle()
+        #expect(workspace.project == baseline && !workspace.dirty && !workspace.canUndo)
+        let capoField = try #require(tuning.descendants().compactMap { $0 as? NSTextField }.first { $0.placeholderString == "0–24" })
+        func enterCapo(_ value: String) throws {
+            #expect(tuning.window.makeFirstResponder(capoField))
+            let editor = try #require(tuning.window.firstResponder as? NSTextView)
+            editor.insertText(value, replacementRange: NSRange(location: 0, length: (editor.string as NSString).length))
+            #expect(tuning.window.makeFirstResponder(nil)); tuning.settle()
+        }
+        try enterCapo("25")
+        try button(tuning, "tuning-apply").performClick(nil); tuning.settle()
+        #expect(workspace.project == baseline && !workspace.dirty && !workspace.canUndo)
+        try enterCapo("2")
+        try button(tuning, "tuning-apply").performClick(nil); tuning.settle()
+        #expect(workspace.project.resolvedTuning == TuningDefinition(openMIDIPitches: TuningDefinition.dropD.openMIDIPitches, capo: 2))
+        #expect(workspace.project.events == [note] && workspace.selectedID == note.id && workspace.dirty)
+        workspace.undoEdit(); #expect(workspace.project == baseline && !workspace.dirty && !workspace.canUndo)
+
+        let pitch = NotePointerTests.Host(PitchAlternatives(workspace: workspace, event: note), height: 480)
+        defer { pitch.close() }
+        try button(pitch, "fingering-disclosure").performClick(nil); pitch.settle()
+        let positions = pitch.descendants().compactMap { $0 as? NSButton }.filter { $0.identifier?.rawValue.hasPrefix("fingering-choice-") == true }
+        #expect(positions.count == 6 && workspace.project == baseline && !workspace.canUndo)
+        try button(pitch, "fingering-choice-2").performClick(nil); pitch.settle()
+        var chosen = note; chosen.string = 2; chosen.fret = 5
+        #expect(workspace.project.events == [chosen] && workspace.selectedID == note.id)
+        try button(pitch, "fingering-choice-2").performClick(nil); pitch.settle()
+        workspace.undoEdit(); pitch.settle()
+        #expect(workspace.project == baseline && !workspace.canUndo && !workspace.dirty)
+        print("Hosted native tuning: Drop D draft, invalid capo 25 atomic rejection, capo 2 application and one-step undo; six standard MIDI64 buttons, 2/5 explicit choice and one-step undo")
+    }
+
     /// Actual SwiftUI tuning fields hosted in a disposable hidden window; no visible GUI claim.
     @Test func nativeTuningFieldsKeepUncommittedMarkedTextAndProjectHistorySeparate() throws {
         _ = NSApplication.shared
-        let workspace = Workspace(services: services()); defer { workspace.shutdown() }
+        let box = TuningTextTargetBox()
+        var service = services(); service.nativeTextUndo = { box.target }
+        let workspace = Workspace(services: service); defer { workspace.shutdown() }
         workspace.project = ScoreProject(duration: 20)
         workspace.seekForEditing(2); workspace.inputDigit(1, at: 100); workspace.inputDigit(2, at: 100.8)
         #expect(workspace.selected?.fret == 12 && workspace.selected?.length == nil)
@@ -159,10 +274,10 @@ struct TuningIntegrationTests {
         #expect(editor.hasMarkedText() && editor.markedRange() == marked && editor.selectedRange() == caret)
         #expect(workspace.project == baseline)
         let target = NativeTextUndoTarget(editor.undoManager, editor: editor)
+        box.target = target
         let canUndo = target.canUndo
-        target.undo(); settle()
+        workspace.performUndo(); settle()
         #expect(workspace.project == baseline && workspace.canUndo)
         print("Hosted tuning field: marked text retained; native undo available=\(canUndo); uncommitted draft never edits TAB")
-        print("Hosted buttons: \(descendants(host).compactMap { $0 as? NSButton }.map(\.title))")
     }
 }

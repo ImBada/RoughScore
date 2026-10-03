@@ -29,8 +29,8 @@ struct TuningEditor: View {
             Text("L/R 공통 · MIDI 0–127 · 프렛은 카포 기준 0–24\n적용해도 기존 시간/줄/프렛은 유지됩니다.")
                 .font(.system(size: 11)).foregroundStyle(.secondary)
             HStack {
-                Button("Standard") { preset(.standard) }
-                Button("Drop D") { preset(.dropD) }
+                BulkActionButton(title: "Standard", identifier: "tuning-standard", enabled: workspace.canMutateNotes) { preset(.standard) }
+                BulkActionButton(title: "Drop D", identifier: "tuning-drop-d", enabled: workspace.canMutateNotes) { preset(.dropD) }
                 Text("또는 직접 MIDI 입력").font(.system(size: 10)).foregroundStyle(.secondary)
             }
             ForEach(0..<6, id: \.self) { index in
@@ -56,7 +56,7 @@ struct TuningEditor: View {
             HStack {
                 Button("취소") { dismiss() }
                 Spacer()
-                Button("적용 · 기존 운지 유지") { apply() }.disabled(!workspace.canMutateNotes)
+                BulkActionButton(title: "적용 · 기존 운지 유지", identifier: "tuning-apply", enabled: workspace.canMutateNotes) { apply() }
             }
         }.font(.system(size: 12)).padding(18).frame(width: 380)
             .onAppear {
@@ -96,7 +96,10 @@ struct PitchAlternatives: View {
         return workspace.fingerings(midi: midi, preferredFret: preference, eventID: event.id)
     }
     var body: some View {
-        DisclosureGroup("음고 / 다른 운지 · 선택 사항", isExpanded: $expanded) {
+        VStack(alignment: .leading, spacing: 8) {
+            BulkActionButton(title: expanded ? "음고 / 다른 운지 ▾" : "음고 / 다른 운지 ▸ · 선택 사항",
+                identifier: "fingering-disclosure", enabled: workspace.canMutateNotes) { expanded.toggle() }
+            if expanded {
             VStack(alignment: .leading, spacing: 8) {
                 Text(event.fret.flatMap { workspace.project.soundingMIDI(string: event.string, fret: $0) }
                     .map { "현재 \(TuningDefinition.pitchName($0)) · MIDI \($0)" } ?? "현재 음고 미확정")
@@ -119,15 +122,17 @@ struct PitchAlternatives: View {
                 if let resolution {
                     Text(explanation(resolution)).foregroundStyle(.secondary)
                     ForEach(resolution.candidates, id: \.string) { candidate in
-                        Button("\(candidate.string)번 / \(candidate.fret)프렛 · 선택") {
+                        BulkActionButton(title: "\(candidate.string)번 / \(candidate.fret)프렛 · 선택",
+                            identifier: "fingering-choice-\(candidate.string)", enabled: workspace.canMutateNotes) {
                             if let midi = Int(midiText), workspace.chooseFingering(midi: midi, string: candidate.string,
                                 fret: candidate.fret, eventID: event.id) { workspace.requestKeyboardFocus?() }
-                        }.disabled(!workspace.canMutateNotes)
+                        }
                     }
                 }
                 Text("같은 L/R의 앞뒤 운지와 선호 위치 순 · 자동 확정 없음 · 선택 후 ⌘Z 한 번")
                     .foregroundStyle(.secondary)
             }.padding(.top, 6)
+            }
         }.font(.system(size: 10))
             .onAppear {
                 midiText = event.fret.flatMap { workspace.project.soundingMIDI(string: event.string, fret: $0) }.map(String.init) ?? ""
