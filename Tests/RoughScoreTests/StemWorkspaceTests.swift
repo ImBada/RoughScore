@@ -10,11 +10,12 @@ import Testing
 @Suite(.serialized)
 struct StemWorkspaceTests {
     private func services(capture: StemCapture? = nil) -> WorkspaceServices {
-        var services = WorkspaceServices.live
+        var services = WorkspaceServices.isolatedCache()
         services.lastProject = { nil }; services.rememberProject = { _ in }; services.chooseSaveDestination = { _ in nil }
         let make = services.makePlayer
-        services.makePlayer = { url in
-            let p = try #require(make(url) as? AudioEnginePlayer)
+        services.makePlayer = { audio, source in
+            let url = audio.url(for: source)
+            let p = try #require(make(audio, source) as? AudioEnginePlayer)
             p.graph.engine.mainMixerNode.outputVolume = 0
             capture?.players[url] = p
             return p
@@ -278,13 +279,16 @@ struct StemWorkspaceTests {
             try prepare(audio)
             if audio.original == stem { control.directory = audio.directory }
         }
-        service.makePlayer = { url in StemFailurePort(native: try make(url), control: control, url: url) }
+        service.makePlayer = { audio, source in
+            return StemFailurePort(native: try make(audio, source), control: control, url: audio.url(for: source)) }
         let w = Workspace(services: service); defer { w.shutdown() }
         #expect(await w.loadAudio(at: original)?.value == true)
         w.project.events = events(); #expect(w.save(to: save)); let baseline = w.project
         w.seek(0.5); w.togglePlayback(); control.prepareFails = true
         #expect(await w.attachStem(at: stem, offset: -0.25)?.value == false)
         #expect(w.project == baseline && !w.dirty && w.playing && w.assetRole == .original)
+        // Persistent rollback releases leases; the cache quota owns deletion.
+        try await service.cacheEnvironment?.preparation.store.setQuota(0)
         #expect(!FileManager.default.fileExists(atPath: try #require(control.directory).path))
         control.prepareFails = false
         #expect(await w.attachStem(at: stem, offset: -0.25)?.value == true)
@@ -302,6 +306,8 @@ struct StemWorkspaceTests {
         #expect(await fenced.loadAudio(at: original)?.value == true)
         let before = fenced.project
         #expect(await fenced.attachStem(at: stem)?.value == false && fenced.project == before && fenced.prepared != nil)
+        // Persistent rollback releases leases; the cache quota owns deletion.
+        try await service.cacheEnvironment?.preparation.store.setQuota(0)
         #expect(!FileManager.default.fileExists(atPath: try #require(control.directory).path))
         try bytes.write(to: stem)
     }

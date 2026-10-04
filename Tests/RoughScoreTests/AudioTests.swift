@@ -65,10 +65,11 @@ struct AudioTests {
         let url = try impulseFixture()
         defer { try? FileManager.default.removeItem(at: url) }
         let capture = RealPlayerCapture()
-        var services = WorkspaceServices.live
+        var services = WorkspaceServices.isolatedCache()
         let factory = services.makePlayer
-        services.makePlayer = { url in
-            let native = try #require(factory(url) as? AudioEnginePlayer)
+        services.makePlayer = { audio, source in
+            let url = audio.url(for: source)
+            let native = try #require(factory(audio, source) as? AudioEnginePlayer)
             native.graph.engine.mainMixerNode.outputVolume = 0
             let player = ObservedAVPlayer(native)
             capture.players[url] = player

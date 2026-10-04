@@ -27,7 +27,7 @@ private struct IdentityFixture {
         return url
     }
     func services() -> WorkspaceServices {
-        var s = WorkspaceServices.live
+        var s = WorkspaceServices.isolatedCache()
         s.lastProject = { nil }; s.rememberProject = { _ in }; s.chooseSaveDestination = { _ in nil }
         return s
     }
@@ -176,7 +176,8 @@ struct AudioIdentityTests {
             assetID: asset.id, identity: identity, channel: "stereo", analyzerVersion: "actual-source-test-v1"))
         let doc = try f.document(project)
         var services = f.services()
-        services.makePlayer = { url in
+        services.makePlayer = { audio, source in
+            let url = audio.url(for: source)
             _ = try f.audio("valid-player-race", value: 0.25)
             let player = try AVAudioPlayer(contentsOf: url)
             #expect(player.prepareToPlay()) // A real valid replacement, rather than an injected error.
@@ -213,7 +214,8 @@ struct AudioIdentityTests {
             await capture.record(result.directory)
             return result
         }
-        services.makePlayer = { url in
+        services.makePlayer = { audio, source in
+            let url = audio.url(for: source)
             try corrupt.write(to: original, options: .atomic)
             return try AVAudioPlayer(contentsOf: url) // Actual corrupted-file initialization failure.
         }

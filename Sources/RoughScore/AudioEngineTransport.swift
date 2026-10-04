@@ -12,6 +12,7 @@ final class AudioEngineGraph {
     let mixer = AVAudioMixerNode()
     let timePitch = AVAudioUnitTimePitch()
     let duration: Double
+    private let accesses: [PreparedAudioFileAccess]
     private let files: [ListeningSource: AVAudioFile]
     private let nodes: [ListeningSource: AVAudioPlayerNode]
     private var anchor = 0.0
@@ -25,16 +26,19 @@ final class AudioEngineGraph {
 
     init(audio: PreparedAudio) throws {
         duration = audio.duration
+        var accesses: [PreparedAudioFileAccess] = []
         var files: [ListeningSource: AVAudioFile] = [:]
         var nodes: [ListeningSource: AVAudioPlayerNode] = [:]
         for source in [ListeningSource.stereo, .left, .right] {
-            let file = try AVAudioFile(forReading: audio.url(for: source))
+            let access = try audio.fileAccess(for: source)
+            let file = try AVAudioFile(forReading: access.url)
+            try access.validate(); accesses.append(access)
             guard file.length > 0, file.length <= Int64(UInt32.max),
                   (1...2).contains(file.processingFormat.channelCount) else { throw AudioIssue.unsupported }
             files[source] = file
             nodes[source] = AVAudioPlayerNode()
         }
-        self.files = files; self.nodes = nodes
+        self.accesses = accesses; self.files = files; self.nodes = nodes
         guard let original = files[.stereo],
               let format = AVAudioFormat(standardFormatWithSampleRate: original.processingFormat.sampleRate, channels: 2)
         else { throw AudioIssue.unsupported }
@@ -131,6 +135,7 @@ final class AudioEngineGraph {
     }
 
     func prepare() -> Bool {
+        do { try accesses.forEach { try $0.validate() } } catch { return false }
         if !scheduled { setPosition(parked) }
         do {
             if preparedGeneration != generation {
@@ -225,26 +230,27 @@ final class AudioEngineTransportFactory {
         let source: ListeningSource
         init(_ graph: AudioEngineGraph, _ source: ListeningSource) { self.graph = graph; self.source = source }
     }
-    private var references: [URL: Reference] = [:]
+    private struct Key: Hashable { let generation: UUID; let source: ListeningSource }
+    private var references: [Key: Reference] = [:]
     private var pending: AudioEngineGraph?
-    private var pendingDirectory: URL?
+    private var pendingGeneration: UUID?
     func prepare(_ audio: PreparedAudio) throws {
         let graph = try AudioEngineGraph(audio: audio)
         references = references.filter { $0.value.graph != nil }
         for source in [ListeningSource.right, .left, .stereo] {
-            references[audio.url(for: source)] = Reference(graph, source)
+            references[Key(generation: audio.generation, source: source)] = Reference(graph, source)
         }
-        pending = graph; pendingDirectory = audio.directory
+        pending = graph; pendingGeneration = audio.generation
     }
     func discard(_ audio: PreparedAudio) {
-        guard pendingDirectory == audio.directory else { return }
-        pending?.stop(); pending = nil; pendingDirectory = nil
+        guard pendingGeneration == audio.generation else { return }
+        pending?.stop(); pending = nil; pendingGeneration = nil
         references = references.filter { $0.value.graph != nil }
     }
-    func player(_ url: URL) throws -> any AudioPlayerTransport {
-        guard let reference = references[url], let graph = reference.graph else { throw AudioIssue.unsupported }
+    func player(_ audio: PreparedAudio, source: ListeningSource) throws -> any AudioPlayerTransport {
+        guard let reference = references[Key(generation: audio.generation, source: source)], let graph = reference.graph else { throw AudioIssue.unsupported }
         let player = AudioEnginePlayer(graph: graph, source: reference.source)
-        if pending === graph { pending = nil; pendingDirectory = nil }
+        if pending === graph { pending = nil; pendingGeneration = nil }
         return player
     }
 }

@@ -6,7 +6,7 @@ import Testing
 @MainActor
 struct CursorEntryTests {
     @Test func waveformUnknownThenArrowAndTwoDigitsCreatesSeparateSparseNotes() {
-        let workspace = Workspace(); defer { workspace.shutdown() }
+        let workspace = Workspace(services: .isolatedCache()); defer { workspace.shutdown() }
         workspace.project = ScoreProject(duration: 20)
         workspace.seekForEditing(4.5, lane: .right)
         workspace.moveSelectedString(by: -1)
@@ -24,7 +24,7 @@ struct CursorEntryTests {
     }
 
     @Test func noSelectionArrowMovesCursorWithFiniteExclusiveBounds() {
-        let workspace = Workspace(); defer { workspace.shutdown() }
+        let workspace = Workspace(services: .isolatedCache()); defer { workspace.shutdown() }
         workspace.project = ScoreProject(duration: 20)
         workspace.seekForEditing(5)
         workspace.nudgeSelectedTime(by: -0.01)

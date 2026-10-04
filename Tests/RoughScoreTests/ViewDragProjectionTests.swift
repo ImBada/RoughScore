@@ -8,7 +8,7 @@ struct ViewDragProjectionTests {
     @Test(arguments: [0.000125, 0.0005, 0.000625, 0.001, 20.0], [false, true])
     func actualProjectionPreservesVerticalAndNoOpTime(duration: Double, vertical: Bool) throws {
         for score in [false, true] {
-            var services = WorkspaceServices.live
+            var services = WorkspaceServices.isolatedCache()
             services.rememberProject = { _ in }; services.lastProject = { nil }; services.chooseSaveDestination = { _ in nil }
             let workspace = Workspace(services: services); defer { workspace.shutdown() }
             let time = duration < 0.002 ? duration / 2 : duration - 0.0005

@@ -33,7 +33,7 @@ private struct SaveFixture {
     func write(_ project: ScoreProject) throws { try JSONEncoder().encode(project).write(to: url, options: .atomic) }
     func read() throws -> ScoreProject { try JSONDecoder().decode(ScoreProject.self, from: Data(contentsOf: url)) }
     func services() -> WorkspaceServices {
-        var services = WorkspaceServices.live
+        var services = WorkspaceServices.isolatedCache()
         services.rememberProject = { _ in }
         services.lastProject = { nil }
         services.chooseSaveDestination = { _ in nil }

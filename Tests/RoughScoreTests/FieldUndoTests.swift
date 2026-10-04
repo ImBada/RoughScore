@@ -12,7 +12,7 @@ private final class TextTargetBox { var target: NativeTextUndoTarget? }
 @Suite(.serialized)
 struct FieldUndoTests {
     private func services(_ box: TextTargetBox = TextTargetBox()) -> WorkspaceServices {
-        var value = WorkspaceServices.live
+        var value = WorkspaceServices.isolatedCache()
         value.rememberProject = { _ in }; value.lastProject = { nil }; value.chooseSaveDestination = { _ in nil }
         value.nativeTextUndo = { box.target }
         return value

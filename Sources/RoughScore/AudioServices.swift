@@ -51,6 +51,8 @@ struct PreparedAudio: Sendable {
     var identity: AudioContentIdentity? = nil
     var stereoURL: URL? = nil
     var mapping: AssetTimeMapping? = nil
+    var resource: PreparedAudioResource = .borrowed
+    let generation = UUID()
     func url(for source: ListeningSource) -> URL {
         switch source { case .stereo: stereoURL ?? original; case .left: left; case .right: right }
     }
@@ -155,11 +157,15 @@ enum AudioPreparation {
                 leftFile.close(); rightFile.close()
                 try Task.checkCancellation()
                 guard try contentFingerprint(url) == fingerprint else { throw AudioIssue.unsupported }
-                return PreparedAudio(original: url, left: leftURL, right: rightURL, directory: directory,
+                let scratch = try OwnedAudioScratch(parent: FileManager.default.temporaryDirectory)
+                let ownedLeft = try scratch.copy(from: leftURL, named: "left.caf")
+                let ownedRight = try scratch.copy(from: rightURL, named: "right.caf")
+                try FileManager.default.removeItem(at: directory)
+                return PreparedAudio(original: url, left: ownedLeft, right: ownedRight, directory: scratch.directoryURL,
                                      duration: duration, isMono: format.channelCount == 1,
                                      leftPeaks: leftPeaks, rightPeaks: rightPeaks,
                                      identity: AudioContentIdentity(sha256: fingerprint, channelCount: Int(format.channelCount),
-                                         sampleRate: format.sampleRate, frameCount: file.length))
+                                         sampleRate: format.sampleRate, frameCount: file.length), resource: .scratch(scratch))
             } catch {
                 try? FileManager.default.removeItem(at: directory)
                 throw error

@@ -167,7 +167,7 @@ struct PositionEditingTests {
     }
 
     private func fixture() -> (Workspace, TabEvent, TabEvent) {
-        let workspace = Workspace()
+        let workspace = Workspace(services: .isolatedCache())
         let note = TabEvent(time: 2, lane: .left, string: 5, fret: 12,
                             length: .eighth, tentative: true, memo: "벤딩 · 확인")
         let otherLane = TabEvent(time: 3, lane: .right, string: 2, fret: 7)

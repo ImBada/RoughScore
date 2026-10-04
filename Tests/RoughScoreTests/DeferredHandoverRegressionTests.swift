@@ -9,10 +9,10 @@ import Testing
 struct DeferredHandoverRegressionHarness {
     let helper = StemReviewHarness()
     func record(_ name: String, _ row: [String:Any]) throws { try helper.record("deferred-"+name,row) }
-    func setup(duration: Double = 6) async throws -> (Workspace, StemReviewCapture, DeferredRegressionControl) {
+    func setup(duration: Double = 6, scratch: Bool = false, environment: AudioCacheEnvironment? = nil) async throws -> (Workspace, StemReviewCapture, DeferredRegressionControl) {
         let o=try helper.fixture("deferred-original",duration:duration,rate:44100),s=try helper.fixture("deferred-stem",duration:duration,padding:0.25)
-        let cap=StemReviewCapture(),control=DeferredRegressionControl();var service=helper.services(cap);let make=service.makePlayer
-        service.makePlayer={url in DeferredRegressionPort(native:try make(url),url:url,control:control)}
+        let cap=StemReviewCapture(),control=DeferredRegressionControl();var service=helper.services(cap, scratch: scratch, environment: environment);let make=service.makePlayer
+        service.makePlayer={audio, source in DeferredRegressionPort(native:try make(audio, source),url:audio.url(for: source),control:control)}
         let w=Workspace(services:service)
         #expect(await w.loadAudio(at:o)?.value==true)
         let original=try #require(w.prepared);control.originalURLs=Set(ListeningSource.allCases.map{original.url(for:$0)})
@@ -133,8 +133,30 @@ struct DeferredHandoverRegressionHarness {
         #expect(w.project.stemAsset?.originalTimeOffset == -0.5 && w.canUndo && !w.canRedo && w.project.events==notes)
         try record("failed-redo",["passed":true,"transactionRetainedOnFailure":true,"nativeGainRetained":true,"cacheRetained":true,"retryOffset":w.project.stemAsset!.originalTimeOffset])
     }
+    // The original deletion contract is still exercised with actual owned scratch CAFs.
+    // Native graph captures are released first: stopping a graph does not close its file descriptors.
     func independentPendingEOFAndShutdownDoNotReviveOrDeleteUserMedia() async throws {
-        let (w,cap,_)=try await setup()
+        let state = try await stoppedEOF(scratch: true)
+        let oldAudio = state.oldAudio, stemAudio = state.stemAudio
+        let originalBytes = state.originalBytes, stemBytes = state.stemBytes
+        state.capture.players.removeAll()
+        #expect(!FileManager.default.fileExists(atPath:oldAudio.directory.path) && !FileManager.default.fileExists(atPath:stemAudio.directory.path))
+        #expect(try Data(contentsOf:oldAudio.original)==originalBytes)
+        #expect(try Data(contentsOf:stemAudio.original)==stemBytes)
+        try record("eof-shutdown",["passed":true,"cursor":state.cursor,"ownedDirectoriesRemovedAfterStop":true,"fixtureMediaBytesRetained":true])
+    }
+
+    private struct EOFState {
+        let oldAudio: PreparedAudio
+        let stemAudio: PreparedAudio
+        let capture: StemReviewCapture
+        let originalBytes: Data
+        let stemBytes: Data
+        let cursor: Double
+    }
+    private func stoppedEOF(scratch: Bool, environment: AudioCacheEnvironment? = nil) async throws -> EOFState {
+        let (w,cap,_)=try await setup(scratch: scratch, environment: environment)
+        defer { w.shutdown() }
         let oldAudio=try #require(w.prepared),old=try #require(cap.players[oldAudio.url(for:.stereo)])
         let originalBytes=try Data(contentsOf:oldAudio.original)
         w.seek(5.96);try await Task.sleep(for:.milliseconds(25))
@@ -144,10 +166,38 @@ struct DeferredHandoverRegressionHarness {
         #expect(!w.playing && w.cursor>=5.96 && w.cursor<6.0)
         w.shutdown();try await Task.sleep(for:.milliseconds(100))
         #expect(!old.isPlaying && !stem.isPlaying)
-        #expect(!FileManager.default.fileExists(atPath:oldAudio.directory.path) && !FileManager.default.fileExists(atPath:stemAudio.directory.path))
-        #expect(try Data(contentsOf:oldAudio.original)==originalBytes)
-        #expect(try Data(contentsOf:stemAudio.original)==stemBytes)
-        try record("eof-shutdown",["passed":true,"cursor":w.cursor,"ownedDirectoriesRemovedAfterStop":true,"fixtureMediaBytesRetained":true])
+        return EOFState(oldAudio: oldAudio, stemAudio: stemAudio, capture: cap,
+                        originalBytes: originalBytes, stemBytes: stemBytes, cursor: w.cursor)
+    }
+
+    func persistentPendingEOFStopsNativeButRetainsLeasesUntilQuotaEviction() async throws {
+        try FileManager.default.createDirectory(at: helper.evidence, withIntermediateDirectories: true)
+        let root = helper.evidence.appendingPathComponent("persistent-eof-cache")
+        let environment = try AudioCacheEnvironment(configuration: .init(root: root))
+        var state: EOFState? = try await stoppedEOF(scratch: false, environment: environment)
+        let originalDirectory = try #require(state).oldAudio.directory
+        let stemDirectory = try #require(state).stemAudio.directory
+        let originalURL = try #require(state).oldAudio.original, stemURL = try #require(state).stemAudio.original
+        let originalBytes = try #require(state).originalBytes, stemBytes = try #require(state).stemBytes
+        var reader: PreparedAudioFileAccess? = try #require(state).stemAudio.fileAccess(for: .stereo)
+        // Shutdown already removed current/outgoing/history Workspace references. Local audio and
+        // stopped native graph readers independently retain their real persistent generations.
+        try await environment.preparation.store.setQuota(0)
+        #expect(FileManager.default.fileExists(atPath: originalDirectory.path) && FileManager.default.fileExists(atPath: stemDirectory.path))
+        state?.capture.players.removeAll()
+        try await environment.preparation.store.trim()
+        #expect(FileManager.default.fileExists(atPath: originalDirectory.path) && FileManager.default.fileExists(atPath: stemDirectory.path))
+        state = nil // Release all local PreparedAudio leases after the native captures.
+        try await environment.preparation.store.trim()
+        #expect(!FileManager.default.fileExists(atPath: originalDirectory.path))
+        #expect(FileManager.default.fileExists(atPath: stemDirectory.path))
+        try #require(reader).validate()
+        reader = nil
+        try await environment.preparation.store.trim()
+        #expect(!FileManager.default.fileExists(atPath: stemDirectory.path))
+        #expect(try Data(contentsOf: originalURL) == originalBytes && Data(contentsOf: stemURL) == stemBytes)
+        try record("persistent-eof-shutdown", ["passed": true, "nativeStoppedBeforeRelease": true,
+            "persistentFilesRetainedWhilePinned": true, "quotaEvictedAfterLastReader": true, "fixtureMediaBytesRetained": true])
     }
 
     func pendingOffsetRateChangeKeepsTheReplacementStemGraph() async throws {
@@ -198,53 +248,58 @@ struct DeferredHandoverRegressionHarness {
 extension StemWorkspaceTests {
     @Test func pendingOffsetRateChangeKeepsTheReplacementStemGraph() async throws {
         let probe = DeferredHandoverRegressionHarness()
-        defer { try? FileManager.default.removeItem(at: probe.helper.evidence) }
+        defer { probe.helper.cleanEvidence() }
         try await probe.pendingOffsetRateChangeKeepsTheReplacementStemGraph()
     }
 
     @Test func failedRapidReversalKeepsActualOutgoingAudioUntilPendingEpoch() async throws {
         let probe = DeferredHandoverRegressionHarness()
-        defer { try? FileManager.default.removeItem(at: probe.helper.evidence) }
+        defer { probe.helper.cleanEvidence() }
         try await probe.failedRapidReversalKeepsActualOutgoingAudioUntilPendingEpoch()
     }
     @Test func pendingRateChangePreservesCommonNativeOriginalTime() async throws {
         let probe = DeferredHandoverRegressionHarness()
-        defer { try? FileManager.default.removeItem(at: probe.helper.evidence) }
+        defer { probe.helper.cleanEvidence() }
         try await probe.pendingRateChangePreservesCommonNativeOriginalTime()
     }
     @Test func offsetCommitDoesNotStopOutgoingStemBeforeOriginalEpoch() async throws {
         let probe = DeferredHandoverRegressionHarness()
-        defer { try? FileManager.default.removeItem(at: probe.helper.evidence) }
+        defer { probe.helper.cleanEvidence() }
         try await probe.offsetCommitDoesNotStopOutgoingStemBeforeOriginalEpoch()
     }
     @Test func successfulRapidReversalKeepsAudibleClockAndDoesNotAdvanceFrozenPendingTime() async throws {
         let probe = DeferredHandoverRegressionHarness()
-        defer { try? FileManager.default.removeItem(at: probe.helper.evidence) }
+        defer { probe.helper.cleanEvidence() }
         try await probe.successfulRapidReversalKeepsAudibleClockAndDoesNotAdvanceFrozenPendingTime()
     }
     @Test func pauseBeforeHandoverEpochFreezesActualAudibleOriginalTime() async throws {
         let probe = DeferredHandoverRegressionHarness()
-        defer { try? FileManager.default.removeItem(at: probe.helper.evidence) }
+        defer { probe.helper.cleanEvidence() }
         try await probe.pauseBeforeHandoverEpochFreezesActualAudibleOriginalTime()
     }
     @Test func pendingSeekAndSourceChangesCancelOldEpochWithoutLateMuting() async throws {
         let probe = DeferredHandoverRegressionHarness()
-        defer { try? FileManager.default.removeItem(at: probe.helper.evidence) }
+        defer { probe.helper.cleanEvidence() }
         try await probe.pendingSeekAndSourceChangesCancelOldEpochWithoutLateMuting()
     }
     @Test func pendingEpochMustNotWrapLoopBeforeOutgoingClockReachesBoundary() async throws {
         let probe = DeferredHandoverRegressionHarness()
-        defer { try? FileManager.default.removeItem(at: probe.helper.evidence) }
+        defer { probe.helper.cleanEvidence() }
         try await probe.pendingEpochMustNotWrapLoopBeforeOutgoingClockReachesBoundary()
     }
     @Test func independentFailedRedoRetainsTransactionNativeGainsAndCacheForRetry() async throws {
         let probe = DeferredHandoverRegressionHarness()
-        defer { try? FileManager.default.removeItem(at: probe.helper.evidence) }
+        defer { probe.helper.cleanEvidence() }
         try await probe.independentFailedRedoRetainsTransactionNativeGainsAndCacheForRetry()
+    }
+    @Test func persistentPendingEOFStopsNativeButRetainsLeasesUntilQuotaEviction() async throws {
+        let probe = DeferredHandoverRegressionHarness()
+        defer { probe.helper.cleanEvidence() }
+        try await probe.persistentPendingEOFStopsNativeButRetainsLeasesUntilQuotaEviction()
     }
     @Test func independentPendingEOFAndShutdownDoNotReviveOrDeleteUserMedia() async throws {
         let probe = DeferredHandoverRegressionHarness()
-        defer { try? FileManager.default.removeItem(at: probe.helper.evidence) }
+        defer { probe.helper.cleanEvidence() }
         try await probe.independentPendingEOFAndShutdownDoNotReviveOrDeleteUserMedia()
     }
 }

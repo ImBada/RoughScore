@@ -47,7 +47,7 @@ struct ScoreLayoutTests {
     }
 
     @MainActor @Test func browsingAndEditingPreserveSparseEvents() {
-        let workspace = Workspace()
+        let workspace = Workspace(services: .isolatedCache())
         workspace.project = ScoreProject(duration: 180, events: [TabEvent(time: 170.123, lane: .right, string: 2)])
         let event = workspace.project.events[0]
         workspace.browseScorePage(3)
@@ -71,7 +71,7 @@ struct ScoreLayoutTests {
     }
 
     @MainActor @Test func changingDensityKeepsThePageBeingRead() {
-        let workspace = Workspace()
+        let workspace = Workspace(services: .isolatedCache())
         workspace.project = ScoreProject(duration: 180)
         workspace.browseScorePage(3)
         let previous = workspace.scoreLayout

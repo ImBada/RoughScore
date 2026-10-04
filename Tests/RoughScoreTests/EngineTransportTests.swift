@@ -17,9 +17,10 @@ struct EngineTransportTests {
             let control = EngineFailureControl()
             var services = quietEngineServices()
             let factory = services.makePlayer
-            services.makePlayer = { url in
+            services.makePlayer = { audio, source in
+            let url = audio.url(for: source)
                 if url == control.failedURL && control.mode == .construction { throw AudioIssue.playbackFailed }
-                let native = try #require(factory(url) as? AudioEnginePlayer)
+                let native = try #require(factory(audio, source) as? AudioEnginePlayer)
                 control.graph = native.graph
                 return FailingEnginePort(native: native, control: control, target: url)
             }
@@ -62,8 +63,9 @@ struct EngineTransportTests {
         defer { a.shutdown(); b.shutdown() }
         #expect(await a.loadAudio(at: url)?.value == true)
         #expect(await b.loadAudio(at: url)?.value == true)
-        let graphA = try #require(captureA.players[url]).graph
-        let graphB = try #require(captureB.players[url]).graph
+        let audioA = try #require(a.prepared), audioB = try #require(b.prepared)
+        let graphA = try #require(captureA.players[audioA.url(for: .stereo)]).graph
+        let graphB = try #require(captureB.players[audioB.url(for: .stereo)]).graph
         #expect(graphA !== graphB && graphA.id != graphB.id)
         a.seek(0.5); b.seek(1); a.togglePlayback(); b.togglePlayback()
         try await Task.sleep(for: .milliseconds(80))
@@ -75,10 +77,11 @@ struct EngineTransportTests {
     }
 
     private func quietEngineServices(capture: EngineCapture? = nil) -> WorkspaceServices {
-        var services = WorkspaceServices.live
+        var services = WorkspaceServices.isolatedCache()
         let factory = services.makePlayer
-        services.makePlayer = { url in
-            let native = try #require(factory(url) as? AudioEnginePlayer)
+        services.makePlayer = { audio, source in
+            let url = audio.url(for: source)
+            let native = try #require(factory(audio, source) as? AudioEnginePlayer)
             native.graph.engine.mainMixerNode.outputVolume = 0
             capture?.players[url] = native
             return native
@@ -112,10 +115,11 @@ struct EngineTransportTests {
         let file = try AVAudioFile(forWriting: url, settings: format.settings)
         try file.write(from: buffer); file.close()
         let capture = EngineCapture()
-        var services = WorkspaceServices.live
+        var services = WorkspaceServices.isolatedCache()
         let factory = services.makePlayer
-        services.makePlayer = { url in
-            let player = try #require(factory(url) as? AudioEnginePlayer)
+        services.makePlayer = { audio, source in
+            let url = audio.url(for: source)
+            let player = try #require(factory(audio, source) as? AudioEnginePlayer)
             player.graph.engine.mainMixerNode.outputVolume = 0
             capture.players[url] = player
             return player

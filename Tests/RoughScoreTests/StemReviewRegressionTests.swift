@@ -9,7 +9,12 @@ import Testing
 
 @MainActor
 struct StemReviewHarness {
-    let evidence = FileManager.default.temporaryDirectory.appendingPathComponent("RoughScore-pr38-regression-" + UUID().uuidString)
+    let evidence = (ProcessInfo.processInfo.environment["ROUGH_SCORE_CACHE_EVIDENCE_ROOT"].map { URL(fileURLWithPath: $0) }
+                    ?? FileManager.default.temporaryDirectory).appendingPathComponent("RoughScore-pr38-regression-" + UUID().uuidString)
+    func cleanEvidence() {
+        guard ProcessInfo.processInfo.environment["ROUGH_SCORE_CACHE_EVIDENCE_ROOT"] == nil else { return }
+        try? FileManager.default.removeItem(at: evidence)
+    }
     func record(_ name: String, _ value: Any) throws {
         try JSONSerialization.data(withJSONObject: value, options: [.prettyPrinted,.sortedKeys]).write(to: evidence.appendingPathComponent(name+".json"))
     }
@@ -27,11 +32,18 @@ struct StemReviewHarness {
         }
         let f=try AVAudioFile(forWriting:url,settings:format.settings);try f.write(from:b);f.close();return url
     }
-    func services(_ capture: StemReviewCapture = StemReviewCapture()) -> WorkspaceServices {
-        var s=WorkspaceServices.live;s.lastProject={nil};s.rememberProject={_ in};s.chooseSaveDestination={_ in nil}
+    func services(_ capture: StemReviewCapture = StemReviewCapture(), scratch: Bool = false, environment: AudioCacheEnvironment? = nil) -> WorkspaceServices {
+        var s = scratch ? WorkspaceServices.cachedLive(environment: nil) : (environment.map { WorkspaceServices.cachedLive(environment: $0) } ?? WorkspaceServices.isolatedCache())
+        if scratch {
+            s.prepare = { try await AudioPreparation.prepare($0, progress: $1) }
+            s.align = { try await AudioPreparation.alignedStem($0, asset: $1, duration: $2) }
+            s.cacheEnvironment = nil
+        }
+        s.lastProject={nil};s.rememberProject={_ in};s.chooseSaveDestination={_ in nil}
         let make=s.makePlayer
-        s.makePlayer={url in
-            let p=try #require(make(url) as? AudioEnginePlayer);p.graph.engine.mainMixerNode.outputVolume=0
+        s.makePlayer={audio, source in
+            let url = audio.url(for: source)
+            let p=try #require(make(audio, source) as? AudioEnginePlayer);p.graph.engine.mainMixerNode.outputVolume=0
             capture.players[url]=p
             return p
         };return s
@@ -42,7 +54,7 @@ struct StemReviewHarness {
          TabEvent(time:2.123456789012,lane:.right,string:2,fret:0,memo:"same time")]
     }
     func independentCrossGraphCommonHostTimeCutover() async throws {
-        defer { try? FileManager.default.removeItem(at: evidence) }
+        defer { cleanEvidence() }
         let o=try fixture("clock-original",duration:12,rate:44100),s=try fixture("clock-stem",duration:12,padding:0.25)
         let cap=StemReviewCapture(),w=Workspace(services:services(cap));defer{w.shutdown()}
         #expect(await w.loadAudio(at:o)?.value==true); #expect(await w.attachStem(at:s,offset:-0.25)?.value==true)
@@ -66,11 +78,11 @@ struct StemReviewHarness {
     }
 
     func failedOffsetUndoMustRetainHistoryAndLease() async throws {
-        defer { try? FileManager.default.removeItem(at: evidence) }
+        defer { cleanEvidence() }
         let o=try fixture("undo-original"),s=try fixture("undo-stem",padding:0.25)
         let cap=StemReviewCapture(),control=StemReviewFailure(),base=services(cap)
         var service=base;let make=base.makePlayer
-        service.makePlayer={url in StemReviewFailPort(native:try make(url),url:url,control:control)}
+        service.makePlayer={audio, source in StemReviewFailPort(native:try make(audio, source),url:audio.url(for: source),control:control)}
         let w=Workspace(services:service);defer{w.shutdown()}
         #expect(await w.loadAudio(at:o)?.value==true);w.project.events=notes();let manual=w.project.events
         let original=try #require(w.prepared);control.originalURLs=Set(ListeningSource.allCases.map{original.url(for:$0)})
@@ -99,7 +111,7 @@ struct StemReviewHarness {
     }
 
     func readableChangedStemDuringOriginalRelinkMustInvalidateContradictedProvenance() async throws {
-        defer { try? FileManager.default.removeItem(at: evidence) }
+        defer { cleanEvidence() }
         let o=try fixture("relink-original"),s=try fixture("relink-stem",padding:0.25),replacement=try fixture("new-stem",padding:0.25)
         var service=services();service.analyze={_,_ in AnalysisSummary(beats:[1],bars:[1])}
         let w=Workspace(services:service);defer{w.shutdown()};#expect(await w.loadAudio(at:o)?.value==true)
@@ -115,7 +127,7 @@ struct StemReviewHarness {
     }
 
     func actualScoreContainerPreservesBrowsedStemPageOnSummaryOnlyUpdate() async throws {
-        defer { try? FileManager.default.removeItem(at: evidence) }
+        defer { cleanEvidence() }
         let original=try fixture("score-original",duration:60),stem=try fixture("score-stem",duration:60,padding:0.25)
         let w=Workspace(services:services());defer{w.shutdown()};#expect(await w.loadAudio(at:original)?.value==true)
         #expect(await w.attachStem(at:stem,offset:-0.25)?.value==true)

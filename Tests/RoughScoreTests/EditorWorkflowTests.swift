@@ -175,7 +175,7 @@ struct EditorWorkflowTests {
     }
 
     private func emptyWorkspace() -> Workspace {
-        let workspace = Workspace()
+        let workspace = Workspace(services: .isolatedCache())
         workspace.project = ScoreProject(title: "빠른 입력 테스트", duration: 20)
         return workspace
     }

@@ -61,9 +61,14 @@ extension AudioPreparation {
                 outputs.forEach { $0.close() }
                 try Task.checkCancellation()
                 guard try contentFingerprint(raw.original) == asset.identity?.sha256 else { throw AudioIssue.sourceChanged }
-                return PreparedAudio(original: raw.original, left: leftURL, right: rightURL, directory: directory,
+                let scratch = try OwnedAudioScratch(parent: FileManager.default.temporaryDirectory)
+                let ownedLeft = try scratch.copy(from: leftURL, named: "left.caf")
+                let ownedRight = try scratch.copy(from: rightURL, named: "right.caf")
+                let ownedStereo = try scratch.copy(from: stereoURL, named: "stereo.caf")
+                try FileManager.default.removeItem(at: directory)
+                return PreparedAudio(original: raw.original, left: ownedLeft, right: ownedRight, directory: scratch.directoryURL,
                     duration: duration, isMono: raw.isMono, leftPeaks: left, rightPeaks: right, identity: raw.identity,
-                    stereoURL: stereoURL, mapping: mapping)
+                    stereoURL: ownedStereo, mapping: mapping, resource: .scratch(scratch))
             } catch {
                 try? FileManager.default.removeItem(at: directory)
                 throw error

@@ -9,7 +9,7 @@ import Testing
 @Suite(.serialized)
 struct BulkWorkspaceTests {
     private func workspace() -> Workspace {
-        var services = WorkspaceServices.live
+        var services = WorkspaceServices.isolatedCache()
         services.rememberProject = { _ in }; services.lastProject = { nil }; services.chooseSaveDestination = { _ in nil }
         let workspace = Workspace(services: services)
         workspace.project = ScoreProject(duration: 16, events: [

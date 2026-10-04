@@ -64,16 +64,15 @@ private struct TransitionFixture {
         return url
     }
     func prepared(_ url: URL, duration: Double = 20) throws -> PreparedAudio {
-        let directory = root.appendingPathComponent("prepared-" + UUID().uuidString)
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let left = directory.appendingPathComponent("left.caf"), right = directory.appendingPathComponent("right.caf")
-        try FileManager.default.copyItem(at: url, to: left)
-        try FileManager.default.copyItem(at: url, to: right)
+        let scratch = try OwnedAudioScratch(parent: root)
+        let directory = scratch.directoryURL
+        let left = try scratch.copy(from: url, named: "left.caf")
+        let right = try scratch.copy(from: url, named: "right.caf")
         return PreparedAudio(original: url, left: left, right: right, directory: directory, duration: duration,
-                             isMono: true, leftPeaks: [0.1], rightPeaks: [0.1])
+                             isMono: true, leftPeaks: [0.1], rightPeaks: [0.1], resource: .scratch(scratch))
     }
     @MainActor func services(last: URL? = nil, demo: URL? = nil) -> WorkspaceServices {
-        var services = WorkspaceServices.live
+        var services = WorkspaceServices.isolatedCache()
         services.prepare = { try await fake.prepare($0, progress: $1) }
         services.createDemo = { _ in try #require(demo) }
         services.analyze = { _, _ in try await fake.analyze() }
@@ -502,7 +501,8 @@ struct WorkspaceTransitionTests {
         try JSONEncoder().encode(new).write(to: newProjectURL)
         let newDocumentBytes = try Data(contentsOf: newProjectURL)
         var services = f.services()
-        services.makePlayer = { url in
+        services.makePlayer = { audio, source in
+            let url = audio.url(for: source)
             if url == newURL { throw PlaybackTestFailure() }
             return try AVAudioPlayer(contentsOf: url)
         }
@@ -535,7 +535,8 @@ struct WorkspaceTransitionTests {
         let url = try f.audio("cancel-during-player")
         let reference = WorkspaceReference()
         var services = f.services()
-        services.makePlayer = { url in
+        services.makePlayer = { audio, source in
+            let url = audio.url(for: source)
             let player = try AVAudioPlayer(contentsOf: url)
             reference.workspace?.cancelLoading()
             return player
