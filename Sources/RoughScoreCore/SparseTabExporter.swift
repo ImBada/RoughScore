@@ -52,11 +52,10 @@ public enum SparseTabExporter {
 
     public static func tuningHeader(for project: ScoreProject) throws -> String {
         _ = try project.validated()
-        let standard = [64, 59, 55, 50, 45, 40]
         if let definition = project.tuningDefinition {
-            let name = definition.openMIDIPitches == standard ? "Standard" : "Custom"
+            let name = definition.name
             let open = definition.openMIDIPitches.map { "\(pitchName($0)) (\($0))" }.joined(separator: ", ")
-            let sounding = definition.openMIDIPitches.map { pitchName($0 + definition.capo) }.joined(separator: ", ")
+            let sounding = (1...6).map { project.soundingMIDI(string: $0, fret: 0).map(pitchName) ?? "?" }.joined(separator: ", ")
             return "\(name) tuning, strings 1-6: \(open); capo \(definition.capo); sounding open: \(sounding). Frets are capo-relative."
         }
         if project.tuning == ["E", "B", "G", "D", "A", "E"] {

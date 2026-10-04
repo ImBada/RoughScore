@@ -6,6 +6,7 @@ import RoughScoreCore
 
 /// Async boundaries are injected so late, failed and cancellation-ignoring services can be tested.
 struct WorkspaceServices: Sendable {
+    var detectPitch: @Sendable (URL, Double) async throws -> DetectedPitch? = { try await AudioPreparation.detectPitch($0, at: $1) }
     var prepare: @Sendable (URL, @escaping @Sendable (Double) async -> Void) async throws -> PreparedAudio
     var createDemo: @Sendable (ScoreProject) async throws -> URL
     var readProject: @Sendable (URL) async throws -> ScoreProject

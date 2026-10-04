@@ -141,6 +141,24 @@ public struct ScoreProject: Codable, Equatable, Sendable {
         return value <= 127 ? value : nil
     }
 
+    public var resolvedTuning: TuningDefinition? {
+        let value = tuningDefinition ?? (tuning == ["E", "B", "G", "D", "A", "E"] ? .standard : nil)
+        return value.flatMap { try? $0.validated() }
+    }
+
+    public var tuningDisplay: String {
+        guard let definition = resolvedTuning else { return "튜닝 미확정 · MIDI/옥타브 설정 필요" }
+        let open = (1...6).map { string in
+            soundingMIDI(string: string, fret: 0).map(TuningDefinition.pitchName) ?? "?"
+        }.joined(separator: " ")
+        return "\(definition.name) · capo \(definition.capo) · \(open) (1→6)"
+    }
+
+    public func stringLabel(_ string: Int) -> String {
+        guard (1...6).contains(string) else { return "?" }
+        return soundingMIDI(string: string, fret: 0).map(TuningDefinition.pitchName) ?? tuning[string - 1]
+    }
+
     public var originalAsset: AudioAsset? { assets?.first { $0.role == .original } }
 
     /// Relink never changes manual annotations. Only proven matching derived data may survive.
