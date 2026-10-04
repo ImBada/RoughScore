@@ -6,18 +6,32 @@ import UniformTypeIdentifiers
 
 @MainActor
 final class Workspace: ObservableObject {
-    @Published var project = ScoreProject.demo { didSet { pruneSelection() } }
-    @Published var prepared: PreparedAudio?
+    @Published var project = ScoreProject.demo {
+        didSet {
+            if oldValue.tuning != project.tuning || oldValue.tuningDefinition != project.tuningDefinition ||
+                oldValue.duration != project.duration || oldValue.events.first(where: { $0.id == selectedID }) != selected {
+                clearPitchDetection()
+            }
+            pruneSelection()
+        }
+    }
+    @Published var prepared: PreparedAudio? {
+        didSet {
+            if oldValue?.directory != prepared?.directory || oldValue?.left != prepared?.left || oldValue?.right != prepared?.right {
+                clearPitchDetection()
+            }
+        }
+    }
     @Published private(set) var audioConnection = "오디오 준비 전"
     @Published private(set) var assetRole: AudioAsset.Role = .original
     @Published private(set) var stemConnection = "스템 없음"
     private var originalAudio: PreparedAudio?
     private var stemAudio: PreparedAudio?
     private var inactivePlayers: [ListeningSource: PreparedPlayer] = [:]
-    @Published var source: ListeningSource = .stereo
-    @Published var lane: GuitarLane = .left
+    @Published var source: ListeningSource = .stereo { didSet { if source != oldValue { clearPitchDetection() } } }
+    @Published var lane: GuitarLane = .left { didSet { if lane != oldValue { clearPitchDetection() } } }
     @Published var activeString = 6
-    @Published var selectedID: UUID?
+    @Published var selectedID: UUID? { didSet { if selectedID != oldValue { clearPitchDetection() } } }
     @Published private(set) var selection = try! TabSelection()
     @Published private(set) var selectionRange: TimeSpan?
     var selectedIDs: Set<UUID> {
@@ -30,7 +44,7 @@ final class Workspace: ObservableObject {
     var canUseTabClipboard: Bool { canMutateNotes && services.nativeTextUndo() == nil }
     private var dragSelection: TabSelection?
     private var dragEvents: [TabEvent]?
-    @Published var cursor = 2.0
+    @Published var cursor = 2.0 { didSet { if cursor != oldValue { clearPitchDetection() } } }
     @Published private(set) var entryInterval = 0.05
     @Published var windowStart = 0.0
     @Published var windowLength = 12.0
@@ -72,6 +86,32 @@ final class Workspace: ObservableObject {
     @Published var inspectorVisible = false
     @Published private(set) var positionDrag: TabEvent?
     @Published private(set) var positionMagnetTargetID: UUID?
+    @Published private(set) var detectedPitch: DetectedPitch?
+    @Published private(set) var detectingPitch = false
+    @Published private(set) var pitchDetectionMessage = ""
+    private var pitchTask: Task<Void, Never>?
+    private var pitchRequestID: UUID?
+    private struct SelectedPitchContext: Equatable {
+        let projectID: UUID
+        let event: TabEvent
+        let directory: URL
+        let audioURL: URL
+        let source: ListeningSource
+        let lane: GuitarLane
+        let cursor: Double
+        let duration: Double
+        let tuning: [String]
+        let tuningDefinition: TuningDefinition?
+    }
+    private var selectedPitchContext: SelectedPitchContext? {
+        guard let event = selected, let audio = prepared else { return nil }
+        return SelectedPitchContext(projectID: projectIdentity, event: event, directory: audio.directory,
+            audioURL: event.lane == .left ? audio.left : audio.right, source: source, lane: lane, cursor: cursor,
+            duration: project.duration, tuning: project.tuning, tuningDefinition: project.tuningDefinition, stemState: stemState)
+    }
+    private func ownsPitchRequest(_ id: UUID, context: SelectedPitchContext) -> Bool {
+        !closed && !Task.isCancelled && pitchRequestID == id && selectedPitchContext == context
+    }
     private struct MagnetDragInput {
         let time: Double
         let string: Int
@@ -96,6 +136,8 @@ final class Workspace: ObservableObject {
         let selectionRange: TimeSpan?
         let cursor: Double?
         let activeString: Int
+        let tuning: [String]
+        let tuningDefinition: TuningDefinition?
         var stemState: StemState? = nil
     }
     private var undoHistory: [EditSnapshot] = []
@@ -181,6 +223,68 @@ final class Workspace: ObservableObject {
         project.events.filter { $0.lane == lane && $0.time >= windowStart && $0.time < windowEnd }
     }
     var selected: TabEvent? { project.events.first { $0.id == selectedID } }
+
+    /// Atomic shared L/R settings change; existing manual positions never remap.
+    @discardableResult
+    func setTuning(openMIDIPitches: [Int], capo: Int) -> Bool {
+        guard canMutateNotes else { return false }
+        let definition = TuningDefinition(openMIDIPitches: openMIDIPitches, capo: capo)
+        guard (try? definition.validated()) != nil else { return false }
+        var candidate = project
+        candidate.tuningDefinition = definition
+        candidate.tuning = openMIDIPitches.map(TuningDefinition.pitchName)
+        guard (try? candidate.validated()) != nil else { return false }
+        if candidate == project { return true }
+        recordUndo(preservingCursor: true); finishEntry(); project = candidate; changed()
+        status = "튜닝/카포 적용 · L/R 공통 · 기존 줄/프렛 유지 · ⌘Z 취소"
+        return true
+    }
+
+    func fingerings(midi: Int, preferredFret: Int? = nil, eventID: UUID) -> FingeringResolution {
+        guard let event = selected, event.id == eventID else { return .invalidContext }
+        return FingeringResolver.resolve(midi: midi, project: project, preferredFret: preferredFret,
+            context: FingeringContext(lane: event.lane, time: event.time, excludingEventID: event.id))
+    }
+
+    /// Re-resolve stale controls against current tuning/selection; apply only the explicit choice.
+    @discardableResult
+    func chooseFingering(midi: Int, string: Int, fret: Int, eventID: UUID) -> Bool {
+        guard canMutateNotes, let event = selected, event.id == eventID,
+              fingerings(midi: midi, eventID: eventID).candidates.contains(where: { $0.string == string && $0.fret == fret })
+        else { return false }
+        if event.string == string && event.fret == fret { return true }
+        updateSelected { $0.string = string; $0.fret = fret }
+        status = "\(string)번 줄 / \(fret)프렛 선택 · ⌘Z로 한 번에 취소"
+        return true
+    }
+
+    func clearPitchDetection() {
+        pitchTask?.cancel(); pitchTask = nil; pitchRequestID = nil
+        detectedPitch = nil; detectingPitch = false; pitchDetectionMessage = ""
+    }
+
+    /// Optional clean-monophonic estimate on the selected lane's prepared PCM; never edits TAB.
+    @discardableResult
+    func detectSelectedPitch() -> Task<Void, Never>? {
+        guard canMutateNotes, let context = selectedPitchContext else { return nil }
+        clearPitchDetection()
+        let id = UUID()
+        pitchRequestID = id; detectingPitch = true
+        let task = Task {
+            defer { if pitchRequestID == id { detectingPitch = false; pitchTask = nil } }
+            do {
+                let result = try await services.detectPitch(context.audioURL, context.event.time)
+                guard ownsPitchRequest(id, context: context) else { return }
+                detectedPitch = result
+                pitchDetectionMessage = result == nil ? "안정된 단음 음고 없음 · 직접 입력 가능" : "단음 추정 · 반음 반올림 · 운지는 직접 선택"
+            } catch {
+                guard ownsPitchRequest(id, context: context) else { return }
+                pitchDetectionMessage = "음고 추정 불가 · 직접 MIDI 입력 가능"
+            }
+        }
+        pitchTask = task
+        return task
+    }
     var canUndo: Bool { !undoHistory.isEmpty }
     var canRedo: Bool { !redoHistory.isEmpty }
     var canPerformUndo: Bool { canEdit && (services.nativeTextUndo()?.canUndo ?? canUndo) }
@@ -257,6 +361,7 @@ final class Workspace: ObservableObject {
     func seekForEditing(_ time: Double, lane: GuitarLane? = nil) {
         guard canMutateNotes, let bounded = TimeBounds.clamp(time, duration: project.duration) else { return }
         endMemoEditing()
+        clearPitchDetection()
         fretEntry.reset(); newlyCreatedID = nil; resetSelection()
         if let lane { selectLane(lane) }
         jumpToScoreTime(bounded); requestKeyboardFocus?()
@@ -264,6 +369,7 @@ final class Workspace: ObservableObject {
     }
     func selectLane(_ value: GuitarLane) {
         guard canMutateNotes else { return }
+        if value != lane { clearPitchDetection() }
         lane = value
         if source != .stereo { switchSource(value == .left ? .left : .right) }
     }
@@ -545,6 +651,7 @@ final class Workspace: ObservableObject {
     func select(_ event: TabEvent) {
         guard canMutateNotes, let actual = project.events.first(where: { $0.id == event.id }) else { return }
         endMemoEditing()
+        clearPitchDetection()
         fretEntry.reset(); newlyCreatedID = nil
         setSelection(try! TabSelection(ids: [actual.id], primaryID: actual.id)); activeString = actual.string; selectLane(actual.lane); jumpToScoreTime(actual.time)
         requestKeyboardFocus?()
@@ -552,9 +659,11 @@ final class Workspace: ObservableObject {
     }
 
     private func resetSelection() {
+        clearPitchDetection()
         selectedID = nil; selection = try! TabSelection(); selectionRange = nil
     }
     private func setSelection(_ value: TabSelection, range: TimeSpan? = nil) {
+        if selectedID != value.primaryID { clearPitchDetection() }
         selection = value; selectedID = value.primaryID; selectionRange = range
     }
     private func pruneSelection() {
@@ -882,6 +991,7 @@ final class Workspace: ObservableObject {
     func clearSelection() {
         guard canEdit else { return }
         if positionDrag != nil { cancelPositionDrag(); return }
+        clearPitchDetection()
         finishEntry(); resetSelection(); requestKeyboardFocus?()
         status = "선택 해제 · 현재 위치에서 숫자로 입력"
     }
@@ -925,7 +1035,7 @@ final class Workspace: ObservableObject {
     @discardableResult
     private func recordUndo(coalescingMemo: Bool = false, preservingCursor: Bool = false, stemState: StemState? = nil) -> UUID {
         if !coalescingMemo { endMemoEditing() }
-        let snapshot = EditSnapshot(events: project.events, selectedID: selectedID, selection: selection, selectionRange: selectionRange, cursor: preservingCursor ? cursor : nil, activeString: activeString, stemState: stemState)
+        let snapshot = editSnapshot(preservingCursor: preservingCursor, stemState: stemState)
         undoHistory.append(snapshot)
         if undoHistory.count > 100 { undoHistory.removeFirst() }
         redoHistory.removeAll()
@@ -937,14 +1047,14 @@ final class Workspace: ObservableObject {
         if positionDrag != nil { cancelPositionDrag(); return }
         endMemoEditing()
         guard let snapshot = undoHistory.popLast() else { return }
-        redoHistory.append(EditSnapshot(events: project.events, selectedID: selectedID, selection: selection, selectionRange: selectionRange, cursor: snapshot.cursor == nil ? nil : cursor, activeString: activeString, stemState: snapshot.stemState == nil ? nil : currentStemState()))
+        redoHistory.append(editSnapshot(preservingCursor: snapshot.cursor != nil, stemState: snapshot.stemState == nil ? nil : currentStemState()))
         restore(snapshot); status = "입력 취소 · ⇧⌘Z로 다시 실행"
     }
     func redoEdit() {
         guard canMutateNotes else { return }
         endMemoEditing()
         guard let snapshot = redoHistory.popLast() else { return }
-        undoHistory.append(EditSnapshot(events: project.events, selectedID: selectedID, selection: selection, selectionRange: selectionRange, cursor: snapshot.cursor == nil ? nil : cursor, activeString: activeString, stemState: snapshot.stemState == nil ? nil : currentStemState()))
+        undoHistory.append(editSnapshot(preservingCursor: snapshot.cursor != nil, stemState: snapshot.stemState == nil ? nil : currentStemState()))
         restore(snapshot); status = "입력 다시 실행"
     }
     private func restore(_ snapshot: EditSnapshot) {
@@ -966,6 +1076,7 @@ final class Workspace: ObservableObject {
         selection = snapshot.selection; selectionRange = snapshot.selectionRange
         selectedID = snapshot.selectedID; activeString = snapshot.activeString
         pruneSelection()
+        project.tuning = snapshot.tuning; project.tuningDefinition = snapshot.tuningDefinition
         fretEntry.reset(); newlyCreatedID = nil
         if let selected { lane = selected.lane }
         if let cursor = snapshot.cursor { jumpToScoreTime(cursor) }
@@ -973,9 +1084,15 @@ final class Workspace: ObservableObject {
         changed(); requestKeyboardFocus?()
     }
     private func changed() {
+        clearPitchDetection()
         projectRevision &+= 1
         refreshSaveState()
         scheduleAutosave()
+    }
+    private func editSnapshot(preservingCursor: Bool = false) -> EditSnapshot {
+        EditSnapshot(events: project.events, selectedID: selectedID, selection: selection, selectionRange: selectionRange,
+                     cursor: preservingCursor ? cursor : nil, activeString: activeString,
+                     tuning: project.tuning, tuningDefinition: project.tuningDefinition, stemState: stemState)
     }
     private func refreshSaveState() {
         dirty = savedProject.map { project != $0 } ?? true
@@ -1315,6 +1432,7 @@ final class Workspace: ObservableObject {
     private func reserveLoad() -> LoadOperation? {
         guard !closed, !analyzing, loadOperation == nil, !busy || startupPending else { return nil }
         cancelPositionDrag(); endMemoEditing()
+        clearPitchDetection()
         let operation = LoadOperation(projectID: projectIdentity, snapshot: project)
         startupPending = false
         loadOperation = operation
@@ -1637,8 +1755,13 @@ final class Workspace: ObservableObject {
         let panel = NSSavePanel(); panel.nameFieldStringValue = project.title + "-TAB.txt"
         panel.allowedContentTypes = [.plainText]
         guard panel.runModal() == .OK, let url = panel.url else { return }
+        do { try exportedText().write(to: url, atomically: true, encoding: .utf8); status = "시간 기반 TAB 텍스트 내보내기 완료" }
+        catch { self.error = error.localizedDescription }
+    }
+
+    func exportedText() throws -> String {
         let formatter = { (time: Double) in String(format: "%.3f", time) }
-        var text = "RoughScore — \(project.title)\nStandard tuning: E B G D A E (1 → 6)\n? = 음 미확인 / 미기록 구간은 쉼표가 아닙니다\n\n"
+        var text = "RoughScore — \(project.title)\n\(try SparseTabExporter.tuningHeader(for: project))\n? = 음 미확인 / 미기록 구간은 쉼표가 아닙니다\n\n"
         for lane in GuitarLane.allCases {
             text += "[\(lane.title)]\n시간(초)\t줄\t프렛\t음표 길이\t표시\t메모\n"
             for event in project.events.filter({ $0.lane == lane }).sorted(by: { $0.time < $1.time }) {
@@ -1646,8 +1769,7 @@ final class Workspace: ObservableObject {
             }
             text += "\n"
         }
-        do { try text.write(to: url, atomically: true, encoding: .utf8); status = "시간 기반 TAB 텍스트 내보내기 완료" }
-        catch { self.error = error.localizedDescription }
+        return text
     }
 
     func confirmDiscard() -> Bool {
@@ -1677,6 +1799,7 @@ final class Workspace: ObservableObject {
     func shutdown() {
         guard !closed else { return }
         closed = true; startupPending = false
+        clearPitchDetection()
         nativeTextObserver?.cancel(); nativeTextObserver = nil; memoSession = nil
         cancelLoading(); cancelAnalysis()
         busy = false

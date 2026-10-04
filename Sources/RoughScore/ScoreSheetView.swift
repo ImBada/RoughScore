@@ -33,7 +33,7 @@ struct ScoreSheetView: View {
                         HStack(alignment: .firstTextBaseline) {
                             VStack(alignment: .leading, spacing: 4) {
                                 Text(workspace.project.title).font(.system(size: 18, weight: .semibold))
-                                Text(workspace.showBothLanes ? "Guitar L + R · Standard tuning" : "\(workspace.lane.title) · Standard tuning")
+                                Text((workspace.showBothLanes ? "Guitar L + R" : workspace.lane.title) + " · " + workspace.project.tuningDisplay)
                                     .font(.system(size: 10)).foregroundStyle(Paper.muted)
                             }
                             Spacer()
@@ -214,7 +214,7 @@ struct ScoreStaff: View {
             let stringTop = 38.0 + offset
             ZStack(alignment: .topLeading) {
                 Canvas { context, size in
-                    let strings = workspace.project.tuning
+                    let strings = (1...6).map { workspace.project.stringLabel($0) }
                     let current = workspace.cursor
                     if current >= row.start && current < row.end {
                         context.fill(Path(CGRect(x: left, y: 31 + offset, width: width, height: 82)), with: .color(Paper.accent.opacity(0.035)))

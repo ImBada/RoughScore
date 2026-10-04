@@ -43,6 +43,15 @@ struct PreparedAudio: Sendable {
     }
 }
 
+struct DetectedPitch: Equatable, Sendable {
+    let frequencyHz: Double
+    let midi: Double
+    var nearestMIDI: Int? {
+        guard frequencyHz.isFinite, frequencyHz > 0, midi.isFinite, (0...127).contains(midi) else { return nil }
+        return Int(midi.rounded())
+    }
+}
+
 enum AudioIssue: LocalizedError {
     case unsupported, tooLong, unavailable, sourceChanged, playbackFailed
     var errorDescription: String? {
@@ -57,6 +66,31 @@ enum AudioIssue: LocalizedError {
 }
 
 enum AudioPreparation {
+    /// Small, bounded selected-lane crop. The result is advisory and contains no fingering.
+    static func detectPitch(_ url: URL, at time: Double) async throws -> DetectedPitch? {
+        let task = Task.detached(priority: .userInitiated) { () throws -> DetectedPitch? in
+            try Task.checkCancellation()
+            guard time.isFinite, time >= 0 else { throw AudioIssue.unsupported }
+            let file = try AVAudioFile(forReading: url, commonFormat: .pcmFormatFloat32, interleaved: false)
+            let format = file.processingFormat
+            guard format.channelCount == 1, (8_000...192_000).contains(format.sampleRate),
+                  time < Double(file.length) / format.sampleRate else { throw AudioIssue.unsupported }
+            file.framePosition = Int64(time * format.sampleRate)
+            let count = AVAudioFrameCount(min(file.length - file.framePosition, Int64(format.sampleRate * 0.35)))
+            guard count > 0, let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: count) else { return nil }
+            try file.read(into: buffer, frameCount: count)
+            guard let channel = buffer.floatChannelData?[0] else { return nil }
+            let samples = Array(UnsafeBufferPointer(start: channel, count: Int(buffer.frameLength)))
+            let result = try MonophonicTranscriber().analyze(samples: samples, sampleRate: format.sampleRate,
+                timeOrigin: time, isCancelled: { Task.isCancelled })
+            try Task.checkCancellation()
+            guard let proposal = result.proposals.first, proposal.qualified,
+                  let hz = proposal.frequencyHz, let midi = proposal.midi else { return nil }
+            return DetectedPitch(frequencyHz: hz, midi: midi)
+        }
+        return try await withTaskCancellationHandler { try await task.value } onCancel: { task.cancel() }
+    }
+
     /// Decode in bounded chunks and preserve each original channel. This is not source separation.
     static func prepare(_ url: URL, progress: @escaping @Sendable (Double) async -> Void = { _ in }) async throws -> PreparedAudio {
         let task = Task.detached(priority: .userInitiated) {

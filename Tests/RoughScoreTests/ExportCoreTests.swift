@@ -65,7 +65,10 @@ struct ExportCoreTests {
         #expect(standard.contains("capo 3") && standard.contains("G4"))
         project.tuningDefinition = TuningDefinition(openMIDIPitches: [64, 59, 55, 50, 45, 38], capo: 2)
         let dropD = try SparseTabExporter.tuningHeader(for: project)
-        #expect(dropD.contains("Custom") && dropD.contains("D2 (38)") && dropD.contains("capo 2") && dropD.contains("capo-relative"))
+        #expect(dropD.contains("Drop D") && dropD.contains("D2 (38)") && dropD.contains("capo 2") && dropD.contains("capo-relative"))
+        project.tuningDefinition = TuningDefinition(openMIDIPitches: [65, 58, 54, 49, 44, 39], capo: 3)
+        let custom = try SparseTabExporter.tuningHeader(for: project)
+        #expect(custom.contains("Custom") && custom.contains("capo 3") && custom.contains("D#2 (39)"))
         project.tuningDefinition = nil; project.tuning = ["D", "A", "F", "C", "G", "D"]
         let unknown = try SparseTabExporter.tuningHeader(for: project)
         #expect(unknown.contains("Unresolved") && unknown.contains("unknown") && !unknown.contains("D2"))
