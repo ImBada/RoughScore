@@ -57,14 +57,22 @@ final class AudioEngineGraph {
     func sourceIsPlaying(_ source: ListeningSource) -> Bool { running && nodes[source]?.isPlaying == true }
     var position: Double {
         guard running else { return parked }
-        if let epoch, deviceTime < epoch { return anchor }
+        if let epoch, deviceTime < epoch {
+            // The file anchor belongs to the future epoch. Express the transport clock at NOW;
+            // Workspace separately holds a stationary seek anchor for an initial queued start.
+            return max(0, anchor + (deviceTime - epoch) * Double(timePitch.rate))
+        }
         // lastRenderTime is an arbitrary node timeline. playerTime converts it to frames consumed
         // in the INPUT/file domain; the shared rate unit has already determined that frame count.
         guard let clock = nodes[.stereo],
               let rendered = mixer.lastRenderTime,
               let played = clock.playerTime(forNodeTime: rendered), played.sampleTime >= 0
         else { return anchor }
-        return min(duration, anchor + Double(played.sampleTime) / played.sampleRate)
+        let renderedHost = AVAudioTime.seconds(forHostTime: rendered.hostTime)
+        // Rate processing may render upstream frames ahead of the current device time. Preserve
+        // the signed timestamp difference: clamping it would expose prefetched future song time.
+        return max(anchor, min(duration, anchor + Double(played.sampleTime) / played.sampleRate +
+                              (deviceTime - renderedHost) * Double(timePitch.rate)))
     }
 
     struct InputClockSnapshot {

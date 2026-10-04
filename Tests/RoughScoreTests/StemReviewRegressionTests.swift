@@ -7,8 +7,8 @@ import SwiftUI
 import Testing
 @testable import RoughScore
 
-@MainActor @Suite(.serialized)
-struct StemReviewRegressionTests {
+@MainActor
+struct StemReviewHarness {
     let evidence = FileManager.default.temporaryDirectory.appendingPathComponent("RoughScore-pr38-regression-" + UUID().uuidString)
     func record(_ name: String, _ value: Any) throws {
         try JSONSerialization.data(withJSONObject: value, options: [.prettyPrinted,.sortedKeys]).write(to: evidence.appendingPathComponent(name+".json"))
@@ -41,7 +41,7 @@ struct StemReviewRegressionTests {
          TabEvent(id:UUID(uuidString:"EDD16A11-F94B-4D80-B34B-C6E03292DA0A")!,time:2.123456789012,lane:.right,string:2,fret:12,length:nil,tentative:true,memo:"manual"),
          TabEvent(time:2.123456789012,lane:.right,string:2,fret:0,memo:"same time")]
     }
-    @Test func independentCrossGraphCommonHostTimeCutover() async throws {
+    func independentCrossGraphCommonHostTimeCutover() async throws {
         defer { try? FileManager.default.removeItem(at: evidence) }
         let o=try fixture("clock-original",duration:12,rate:44100),s=try fixture("clock-stem",duration:12,padding:0.25)
         let cap=StemReviewCapture(),w=Workspace(services:services(cap));defer{w.shutdown()}
@@ -65,7 +65,7 @@ struct StemReviewRegressionTests {
         }
     }
 
-    @Test func failedOffsetUndoMustRetainHistoryAndLease() async throws {
+    func failedOffsetUndoMustRetainHistoryAndLease() async throws {
         defer { try? FileManager.default.removeItem(at: evidence) }
         let o=try fixture("undo-original"),s=try fixture("undo-stem",padding:0.25)
         let cap=StemReviewCapture(),control=StemReviewFailure(),base=services(cap)
@@ -98,7 +98,7 @@ struct StemReviewRegressionTests {
         #expect(w.project.events == manual)
     }
 
-    @Test func readableChangedStemDuringOriginalRelinkMustInvalidateContradictedProvenance() async throws {
+    func readableChangedStemDuringOriginalRelinkMustInvalidateContradictedProvenance() async throws {
         defer { try? FileManager.default.removeItem(at: evidence) }
         let o=try fixture("relink-original"),s=try fixture("relink-stem",padding:0.25),replacement=try fixture("new-stem",padding:0.25)
         var service=services();service.analyze={_,_ in AnalysisSummary(beats:[1],bars:[1])}
@@ -114,7 +114,7 @@ struct StemReviewRegressionTests {
         #expect(w.project.stemAsset?.identity==nil,"Readable changed stem must clear contradicted source identity as project-open does")
     }
 
-    @Test func actualScoreContainerPreservesBrowsedStemPageOnSummaryOnlyUpdate() async throws {
+    func actualScoreContainerPreservesBrowsedStemPageOnSummaryOnlyUpdate() async throws {
         defer { try? FileManager.default.removeItem(at: evidence) }
         let original=try fixture("score-original",duration:60),stem=try fixture("score-stem",duration:60,padding:0.25)
         let w=Workspace(services:services());defer{w.shutdown()};#expect(await w.loadAudio(at:original)?.value==true)
@@ -138,4 +138,24 @@ struct StemReviewRegressionTests {
  var currentTime:Double{get{native.currentTime}set{native.currentTime=newValue}};var rate:Float{get{native.rate}set{native.rate=newValue}};var volume:Float{get{native.volume}set{native.volume=newValue}};var enableRate:Bool{get{native.enableRate}set{native.enableRate=newValue}};var isPlaying:Bool{native.isPlaying};var deviceCurrentTime:Double{native.deviceCurrentTime};var sharedClockID:UUID?{native.sharedClockID}
  func prepareToPlay()->Bool{native.prepareToPlay()};func play()->Bool{!(control.failOriginalPlay && control.originalURLs.contains(url)) && native.play()};func play(atTime t:Double)->Bool{!(control.failOriginalPlay && control.originalURLs.contains(url)) && native.play(atTime:t)};func pause(){native.pause()};func stop(){native.stop()}
  func clockSnapshot() -> PlaybackClockSnapshot { native.clockSnapshot() }
+}
+
+// These native probes share the existing serialized asset-transport suite.
+extension StemWorkspaceTests {
+    @Test func independentCrossGraphCommonHostTimeCutover() async throws {
+        let probe = StemReviewHarness()
+        try await probe.independentCrossGraphCommonHostTimeCutover()
+    }
+    @Test func failedOffsetUndoMustRetainHistoryAndLease() async throws {
+        let probe = StemReviewHarness()
+        try await probe.failedOffsetUndoMustRetainHistoryAndLease()
+    }
+    @Test func readableChangedStemDuringOriginalRelinkMustInvalidateContradictedProvenance() async throws {
+        let probe = StemReviewHarness()
+        try await probe.readableChangedStemDuringOriginalRelinkMustInvalidateContradictedProvenance()
+    }
+    @Test func actualScoreContainerPreservesBrowsedStemPageOnSummaryOnlyUpdate() async throws {
+        let probe = StemReviewHarness()
+        try await probe.actualScoreContainerPreservesBrowsedStemPageOnSummaryOnlyUpdate()
+    }
 }
