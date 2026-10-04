@@ -152,6 +152,37 @@ struct CacheDeferredOwnershipTests {
         #expect(workspace.prepared?.generation == replacement.generation)
     }
 
+    @Test func warmCanonicalSummaryRechecksSourceAndAttributesOnlyCurrentProject() async throws {
+        let fixture = try StreamingCacheFixture(seconds: 2, channels: 1); defer { fixture.clean() }
+        let environment = try AudioCacheEnvironment(configuration: .init(root: fixture.cache))
+        let counter = DeferredSummaryCounter(), clock = CacheDeferredClock()
+        var service = services(environment, clock: clock)
+        service.analyzerVersion = "canonical-current-context-v1"
+        service.analyze = { url, _ in
+            #expect(!url.path.hasPrefix("/dev/fd/") && url != fixture.source)
+            await counter.record()
+            return AnalysisSummary(beats: [0.2])
+        }
+        let first = Workspace(services: service), second = Workspace(services: service)
+        defer { first.shutdown(); second.shutdown() }
+        #expect(await first.loadAudio(at: fixture.source)?.value == true)
+        #expect(await second.loadAudio(at: fixture.source)?.value == true)
+        await first.analyze()?.value; await second.analyze()?.value
+        #expect(await counter.calls == 1)
+        let firstAsset = try #require(first.project.originalAsset)
+        let secondAsset = try #require(second.project.originalAsset)
+        #expect(firstAsset.id != secondAsset.id)
+        #expect(first.summary?.provenance?.assetID == firstAsset.id)
+        #expect(second.summary?.provenance?.assetID == secondAsset.id)
+        #expect(second.summary?.provenance?.identity == secondAsset.identity)
+        second.project.analyses.removeAll()
+        try StreamingCacheFixture.write(fixture.source, seconds: 0.5, channels: 1)
+        await second.analyze()?.value // Hits the completed cache before original-source revalidation.
+        #expect(await counter.calls == 1)
+        #expect(second.project.analyses.isEmpty && second.summary == nil && second.error != nil)
+        #expect(first.summary?.provenance?.assetID == firstAsset.id)
+    }
+
     @Test func detachedOutgoingStemLeaseSurvivesEvictionUntilHandoverFinishes() async throws {
         let fixture = try StreamingCacheFixture(seconds: 4, channels: 1); defer { fixture.clean() }
         let environment = try AudioCacheEnvironment(configuration: .init(root: fixture.cache))
@@ -213,4 +244,9 @@ struct CacheDeferredOwnershipTests {
         try await evict(directory, environment: environment)
         #expect(exists(fixture.source))
     }
+}
+
+private actor DeferredSummaryCounter {
+    var calls = 0
+    func record() { calls += 1 }
 }

@@ -18,11 +18,16 @@ struct AudioCacheEnvironment: Sendable {
         return try AudioCacheEnvironment(configuration: .init(root: parent.appendingPathComponent("prepared-v1")))
     }
 
+    /// Descriptor semantics remain the default for injected producers. AVURLAsset-backed Apple
+    /// analysis requires a regular CAF pathname, fenced by the same retained reader and lease.
+    enum SummaryInputMode: Sendable { case descriptor, canonicalFile }
+
     func summary(_ audio: CachedAudioPreparation.Result, channel: ListeningSource, modelVersion: String,
-                 relevantSettings: [String: String] = [:],
+                 relevantSettings: [String: String] = [:], inputMode: SummaryInputMode = .descriptor,
                  produce: @escaping @Sendable (URL, Double) async throws -> AnalysisSummary) async throws -> AnalysisSummary {
         let name = channel == .stereo ? audio.metadata.stereo : channel == .left ? audio.metadata.left : audio.metadata.right
         let reader = try audio.lease.reader(name)
+        defer { withExtendedLifetime(reader) {} }
         var settings = relevantSettings
         settings["runtime"] = ProcessInfo.processInfo.operatingSystemVersionString
         settings["features"] = "rhythm,key,structure,instrumentActivity-v1"
@@ -30,7 +35,11 @@ struct AudioCacheEnvironment: Sendable {
         settings["channel"] = channel.rawValue; settings["duration"] = String(audio.metadata.duration)
         let key = OwnedArtifactCache.Key(contentSHA256: audio.metadata.identity.sha256, kind: "music-analysis", algorithm: modelVersion, settings: settings)
         let result = try await CachedAnalysisOutputs.summary(store: preparation.store, key: key, duration: audio.metadata.duration) {
-            let output = try await produce(reader.url, audio.metadata.duration)
+            // The detached shared producer owns this reader even if its consumer cancels or closes.
+            defer { withExtendedLifetime(reader) {} }
+            try reader.validate()
+            let url = try inputMode == .canonicalFile ? reader.canonicalURL() : reader.url
+            let output = try await produce(url, audio.metadata.duration)
             try reader.validate()
             return output
         }

@@ -1299,7 +1299,7 @@ final class Workspace: ObservableObject {
                 let summary: AnalysisSummary
                 if let environment = services.cacheEnvironment, let cached = prepared.resource.cached {
                     summary = try await environment.summary(cached, channel: target, modelVersion: services.analyzerVersion,
-                        produce: services.analyze)
+                        inputMode: services.analysisInputMode, produce: services.analyze)
                 } else {
                     let access = try prepared.fileAccess(for: target)
                     defer { withExtendedLifetime(access) {} }

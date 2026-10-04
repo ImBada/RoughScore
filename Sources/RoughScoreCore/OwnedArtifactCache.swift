@@ -201,9 +201,16 @@ public actor OwnedArtifactCache {
             public let url: URL
             private let file: CacheFile
             private let lease: Lease
-            fileprivate init(file: CacheFile, lease: Lease) {
-                self.file = file; self.lease = lease
+            private let name: String
+            fileprivate init(file: CacheFile, lease: Lease, name: String) {
+                self.file = file; self.lease = lease; self.name = name
                 url = URL(fileURLWithPath: "/dev/fd/\(file.fd)")
+            }
+            /// URL-only backends may reopen this app-owned canonical file. The reader still pins
+            /// its generation and independent descriptor; callers must validate after awaited work.
+            public func canonicalURL() throws -> URL {
+                try validate()
+                return try lease.url(name)
             }
             public func validate() throws {
                 guard file.unchanged else { throw CacheError.invalidArtifact }
@@ -217,7 +224,7 @@ public actor OwnedArtifactCache {
             guard let expected = files[name] else { throw CacheError.invalidArtifact }
             let independent = try directory.file(name)
             guard CacheFile.sameState(independent.info, expected.info) else { throw CacheError.invalidArtifact }
-            return Reader(file: independent, lease: self)
+            return Reader(file: independent, lease: self, name: name)
         }
         public func withPinnedFile<T>(_ name: String, _ read: (URL) throws -> T) throws -> T {
             let reader = try reader(name)

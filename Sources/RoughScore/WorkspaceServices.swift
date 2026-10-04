@@ -15,6 +15,7 @@ struct WorkspaceServices: Sendable {
     var createDemo: @Sendable (ScoreProject) async throws -> URL
     var readProject: @Sendable (URL) async throws -> ScoreProject
     var analyze: @Sendable (URL, Double) async throws -> AnalysisSummary
+    var analysisInputMode: AudioCacheEnvironment.SummaryInputMode = .descriptor
     var analyzerVersion = "apple-musicunderstanding-v1"
     var makePlayer: @MainActor @Sendable (PreparedAudio, ListeningSource) throws -> any AudioPlayerTransport
     var prepareTransport: @MainActor @Sendable (PreparedAudio) throws -> Void = { _ in }
@@ -67,6 +68,7 @@ struct WorkspaceServices: Sendable {
             return try await withTaskCancellationHandler { try await task.value } onCancel: { task.cancel() }
         },
         analyze: { try await AppleMusicAnalysis.analyze($0, duration: $1) },
+        analysisInputMode: .canonicalFile,
         makePlayer: { try factory.player($0, source: $1) },
         prepareTransport: { try factory.prepare($0) },
         discardPreparedTransport: { factory.discard($0) },
