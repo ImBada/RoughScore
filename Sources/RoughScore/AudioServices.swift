@@ -36,8 +36,10 @@ struct PreparedAudio: Sendable {
     let leftPeaks: [Float]
     let rightPeaks: [Float]
     var identity: AudioContentIdentity? = nil
+    var stereoURL: URL? = nil
+    var mapping: AssetTimeMapping? = nil
     func url(for source: ListeningSource) -> URL {
-        switch source { case .stereo: original; case .left: left; case .right: right }
+        switch source { case .stereo: stereoURL ?? original; case .left: left; case .right: right }
     }
 }
 
