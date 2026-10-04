@@ -16,6 +16,7 @@ protocol AudioPlayerTransport: AnyObject {
     var isPlaying: Bool { get }
     var deviceCurrentTime: TimeInterval { get }
     var sharedClockID: UUID? { get }
+    func clockSnapshot() -> PlaybackClockSnapshot
     func play(atTime time: TimeInterval) -> Bool
     func prepareToPlay() -> Bool
     func play() -> Bool
@@ -23,7 +24,19 @@ protocol AudioPlayerTransport: AnyObject {
     func stop()
 }
 
-extension AudioPlayerTransport { var sharedClockID: UUID? { nil } }
+struct PlaybackClockSnapshot {
+    let position: Double
+    let deviceTime: Double
+}
+
+extension AudioPlayerTransport {
+    var sharedClockID: UUID? { nil }
+    func clockSnapshot() -> PlaybackClockSnapshot {
+        let before = deviceCurrentTime
+        let position = currentTime
+        return PlaybackClockSnapshot(position: position, deviceTime: (before + deviceCurrentTime) / 2)
+    }
+}
 extension AVAudioPlayer: AudioPlayerTransport {}
 
 struct PreparedAudio: Sendable {

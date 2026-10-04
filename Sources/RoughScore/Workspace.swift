@@ -166,6 +166,9 @@ final class Workspace: ObservableObject {
         let position: Double
     }
     private var scheduledStart: ScheduledStart?
+    private var assetHandoverTask: Task<Void, Never>?
+    private var assetHandoverID: UUID?
+    private var outgoingAssetPlayers: [ListeningSource: PreparedPlayer] = [:]
     private var preparedPlayers: [ListeningSource: PreparedPlayer] = [:]
     private var timer: Timer?
     private var analysisTask: Task<Void, Never>?
@@ -308,9 +311,13 @@ final class Workspace: ObservableObject {
     var activeAsset: AudioAsset? { assetRole == .original ? project.originalAsset : project.stemAsset }
     var summary: AnalysisSummary? { project.analyses[project.analysisKey(asset: activeAsset, channel: source)] }
     var scoreSummary: AnalysisSummary? {
-        project.analyses[project.analysisKey(asset: activeAsset, channel: .stereo)] ?? summary ??
-            project.analyses[project.analysisKey(asset: activeAsset, channel: .left)] ??
-            project.analyses[project.analysisKey(asset: activeAsset, channel: .right)]
+        scoreSummary(in: project.analyses)
+    }
+    func scoreSummary(in analyses: [String: AnalysisSummary]) -> AnalysisSummary? {
+        analyses[project.analysisKey(asset: activeAsset, channel: .stereo)] ??
+            analyses[project.analysisKey(asset: activeAsset, channel: source)] ??
+            analyses[project.analysisKey(asset: activeAsset, channel: .left)] ??
+            analyses[project.analysisKey(asset: activeAsset, channel: .right)]
     }
     var scoreLayout: ScoreLayout {
         ScoreLayout(duration: project.duration, bars: scoreSummary?.bars ?? [], measuresPerSystem: measuresPerSystem,
@@ -426,6 +433,7 @@ final class Workspace: ObservableObject {
     }
 
     private func pausePlayers() {
+        finishAssetHandover()
         let pending = scheduledStart
         let restoreAnchor = pending.map { pending in
             player.map { $0.deviceCurrentTime < pending.epoch || $0.currentTime < pending.position } ?? false
@@ -439,6 +447,14 @@ final class Workspace: ObservableObject {
             cached.scheduledEpoch = nil; preparedPlayers[value] = cached
         }
         scheduledStart = nil
+    }
+
+    private func finishAssetHandover() {
+        assetHandoverTask?.cancel(); assetHandoverTask = nil; assetHandoverID = nil
+        for cached in outgoingAssetPlayers.values {
+            cached.transport.volume = 0; cached.transport.pause()
+        }
+        outgoingAssetPlayers.removeAll()
     }
 
     private func updatePlaybackRate() {
@@ -1051,32 +1067,39 @@ final class Workspace: ObservableObject {
         guard canEdit else { return }
         if positionDrag != nil { cancelPositionDrag(); return }
         endMemoEditing()
-        guard let snapshot = undoHistory.popLast() else { return }
-        redoHistory.append(editSnapshot(preservingCursor: snapshot.cursor != nil, stemState: snapshot.stemState == nil ? nil : currentStemState()))
-        restore(snapshot); status = "입력 취소 · ⇧⌘Z로 다시 실행"
+        guard let snapshot = undoHistory.last else { return }
+        let inverse = editSnapshot(preservingCursor: snapshot.cursor != nil, stemState: snapshot.stemState == nil ? nil : currentStemState())
+        guard restore(snapshot) else { return }
+        undoHistory.removeLast(); redoHistory.append(inverse)
+        cleanRetiredStemCaches()
+        status = "입력 취소 · ⇧⌘Z로 다시 실행"
     }
     func redoEdit() {
         guard canMutateNotes else { return }
         endMemoEditing()
-        guard let snapshot = redoHistory.popLast() else { return }
-        undoHistory.append(editSnapshot(preservingCursor: snapshot.cursor != nil, stemState: snapshot.stemState == nil ? nil : currentStemState()))
-        restore(snapshot); status = "입력 다시 실행"
+        guard let snapshot = redoHistory.last else { return }
+        let inverse = editSnapshot(preservingCursor: snapshot.cursor != nil, stemState: snapshot.stemState == nil ? nil : currentStemState())
+        guard restore(snapshot) else { return }
+        redoHistory.removeLast(); undoHistory.append(inverse)
+        cleanRetiredStemCaches()
+        status = "입력 다시 실행"
     }
-    private func restore(_ snapshot: EditSnapshot) {
-        positionDrag = nil; positionMagnetTargetID = nil; magnetDragInput = nil
-        dragSelection = nil; dragEvents = nil
+    private func restore(_ snapshot: EditSnapshot) -> Bool {
         if let state = snapshot.stemState {
-            if assetRole == .importedGuitarStem, !switchAsset(.original) { return }
+            let candidate: ScoreProject
+            do { candidate = try project.attachingStem(state.asset) }
+            catch { self.error = error.localizedDescription; return false }
+            if assetRole == .importedGuitarStem, !switchAsset(.original) { return false }
             inactivePlayers.values.forEach { $0.transport.stop() }
             if let old = stemAudio { retiredStemDirectories.insert(old.directory) }
             retiredStemDirectories.insert(state.audio.directory)
             stemAudio = state.audio; inactivePlayers = state.players
-            if let candidate = try? project.attachingStem(state.asset) {
-                project = candidate
-                for (key, summary) in state.analyses { project.analyses[key] = summary }
-            }
+            project = candidate
+            for (key, summary) in state.analyses { project.analyses[key] = summary }
             stemConnection = stemDescription(state.audio, asset: state.asset)
         }
+        positionDrag = nil; positionMagnetTargetID = nil; magnetDragInput = nil
+        dragSelection = nil; dragEvents = nil
         project.events = snapshot.events
         selection = snapshot.selection; selectionRange = snapshot.selectionRange
         selectedID = snapshot.selectedID; activeString = snapshot.activeString
@@ -1087,6 +1110,7 @@ final class Workspace: ObservableObject {
         if let cursor = snapshot.cursor { jumpToScoreTime(cursor) }
         else if let selected { jumpToScoreTime(selected.time) }
         changed(); requestKeyboardFocus?()
+        return true
     }
     private func changed() {
         clearPitchDetection()
@@ -1352,6 +1376,7 @@ final class Workspace: ObservableObject {
     func switchAsset(_ role: AudioAsset.Role) -> Bool {
         guard canMutateNotes else { return false }
         if role == assetRole { return true }
+        finishAssetHandover()
         if role == .original, originalAudio == nil {
             let sampled = boundedPlaybackTime(livePlayerTime(player))
             pausePlayers(); preparedPlayers.values.forEach { $0.transport.volume = 0 }
@@ -1381,18 +1406,55 @@ final class Workspace: ObservableObject {
             let sampled = livePlayerTime(old)
             let loopWrap = looping && sampled >= loopEnd
             let resume = playing && (old?.isPlaying == true || loopWrap)
-            let time = loopWrap ? loopStart : boundedPlaybackTime(sampled)
-            for cached in group.values { cached.transport.volume = 0; cached.transport.rate = rate; cached.transport.currentTime = time }
-            let epoch = destination.deviceCurrentTime + 0.02
-            if resume {
+            let clock = old?.clockSnapshot()
+            let pending = scheduledStart
+            var time = loopWrap ? loopStart : boundedPlaybackTime(sampled)
+            var epoch = destination.deviceCurrentTime
+            var scheduled = false
+            var lead = 0.08
+            // All destination IO and native node preparation stays muted while the old graph runs.
+            // Predict the exact original position at a common future epoch; retry a missed deadline
+            // without ever consuming the old clock or publishing a partial destination group.
+            for _ in 0..<3 {
+                let preparingAt = destination.deviceCurrentTime
+                epoch = preparingAt + (resume ? lead : 0)
+                if resume, !loopWrap, let clock {
+                    let reference = pending.map { PlaybackClockSnapshot(position: $0.position, deviceTime: $0.epoch) } ?? clock
+                    time = boundedPlaybackTime(reference.position + max(0, epoch - reference.deviceTime) * Double(rate))
+                }
+                var positioned: Set<UUID> = []
                 for cached in group.values {
+                    cached.transport.volume = 0; cached.transport.rate = rate
+                    if let id = cached.transport.sharedClockID, !positioned.insert(id).inserted { continue }
+                    cached.transport.currentTime = time
+                    guard cached.transport.prepareToPlay() else { throw AudioIssue.playbackFailed }
+                }
+                if resume, destination.deviceCurrentTime >= epoch - 0.02 {
+                    lead = max(lead * 2, destination.deviceCurrentTime - preparingAt + 0.04)
+                    continue
+                }
+                for cached in group.values where resume {
                     guard cached.transport.play(atTime: epoch), cached.transport.isPlaying else { throw AudioIssue.playbackFailed }
                 }
+                if resume, destination.deviceCurrentTime >= epoch - 0.002 {
+                    group.values.forEach { $0.transport.pause() }
+                    lead = max(lead * 2, destination.deviceCurrentTime - preparingAt + 0.04)
+                    continue
+                }
+                scheduled = true; break
             }
+            guard scheduled else { throw AudioIssue.playbackFailed }
             try requireHandover()
-            pausePlayers()
-            // Set every old gain to zero before exposing the new group.
-            preparedPlayers.values.forEach { $0.transport.volume = 0 }
+            if resume {
+                outgoingAssetPlayers = preparedPlayers
+                let token = UUID(); assetHandoverID = token
+                assetHandoverTask = Task { [weak self] in
+                    let delay = max(0, epoch - destination.deviceCurrentTime)
+                    do { try await Task.sleep(for: .seconds(delay)) } catch { return }
+                    guard let self, self.assetHandoverID == token else { return }
+                    self.finishAssetHandover()
+                }
+            } else { pausePlayers(); preparedPlayers.values.forEach { $0.transport.volume = 0 } }
             inactivePlayers = preparedPlayers; preparedPlayers = group
             prepared = audio; assetRole = role; player = destination; pitchProposals = []
             destination.volume = group[source]!.volume
@@ -1535,13 +1597,7 @@ final class Workspace: ObservableObject {
             } catch {
                 try requireCurrent(operation)
                 staged.stemReason = "스템 연결 실패 · 원곡/TAB 유지 · 다시 연결: " + error.localizedDescription
-                if let fingerprint = try? await AudioPreparation.fingerprint(URL(fileURLWithPath: asset.reference.path)),
-                   fingerprint != asset.identity?.sha256 {
-                    staged.project.analyses = staged.project.analyses.filter { $0.value.provenance?.assetID != asset.id }
-                    if let index = staged.project.assets?.firstIndex(where: { $0.id == asset.id }) {
-                        staged.project.assets?[index].identity = nil
-                    }
-                }
+                staged.project = try await invalidatingContradictedStem(in: staged.project, asset: asset, operation: operation)
                 try requireCurrent(operation)
             }
         }
@@ -1562,6 +1618,20 @@ final class Workspace: ObservableObject {
         staged.status = "합성 오디오 + 수동 TAB 예시 · 자동 채보 결과가 아닙니다"
         retained = true
         return staged
+    }
+
+    /// Missing/unreadable media cannot disprove prior provenance. Readable changed bytes can.
+    private func invalidatingContradictedStem(in project: ScoreProject, asset: AudioAsset,
+                                             operation: LoadOperation) async throws -> ScoreProject {
+        let fingerprint = try? await AudioPreparation.fingerprint(URL(fileURLWithPath: asset.reference.path))
+        try requireCurrent(operation)
+        guard let fingerprint, fingerprint != asset.identity?.sha256 else { return project }
+        var candidate = project
+        candidate.analyses = candidate.analyses.filter { $0.value.provenance?.assetID != asset.id }
+        if let index = candidate.assets?.firstIndex(where: { $0.id == asset.id }) {
+            candidate.assets?[index].identity = nil
+        }
+        return candidate
     }
 
     private func performLoad(_ request: LoadRequest, operation: LoadOperation) async -> Bool {
@@ -1603,7 +1673,13 @@ final class Workspace: ObservableObject {
                         let readyStem = try await prepareStem(asset.reference.path, asset: asset,
                             duration: stemDuration, requireIdentity: true, operation: operation).audio
                         staged?.stemAudio = readyStem
-                    } catch { try requireCurrent(operation); staged?.stemReason = "스템 오프라인 · 다시 연결: " + error.localizedDescription }
+                    } catch {
+                        try requireCurrent(operation)
+                        staged?.stemReason = "스템 오프라인 · 다시 연결: " + error.localizedDescription
+                        if let project = staged?.project {
+                            staged?.project = try await invalidatingContradictedStem(in: project, asset: asset, operation: operation)
+                        }
+                    }
                 }
             case .project(let url): staged = try await stageProject(url, operation: operation)
             }
@@ -1811,6 +1887,7 @@ final class Workspace: ObservableObject {
     }
 
     private func stopAndCleanAudio() {
+        finishAssetHandover()
         for cached in preparedPlayers.values { cached.transport.stop() }
         for cached in inactivePlayers.values { cached.transport.stop() }
         inactivePlayers.removeAll()

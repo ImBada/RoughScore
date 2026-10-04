@@ -78,6 +78,12 @@ final class AudioEngineGraph {
     /// One actual upstream render timestamp for every player; never compare stale per-node renders.
     func inputClockSnapshot() -> InputClockSnapshot? {
         guard let render = mixer.lastRenderTime else { return nil }
+        if running, let epoch, AVAudioTime.seconds(forHostTime: render.hostTime) < epoch {
+            // A scheduled group has consumed zero file frames before its common start epoch.
+            return InputClockSnapshot(renderFrame: render.sampleTime, sampleRate: render.sampleRate,
+                                      hostTime: render.hostTime, playerFrames: nodes.mapValues { _ in 0 },
+                                      positions: nodes.mapValues { _ in anchor })
+        }
         var frames: [ListeningSource: AVAudioFramePosition] = [:]
         var positions: [ListeningSource: Double] = [:]
         for (source, node) in nodes {
@@ -145,9 +151,11 @@ final class AudioEngineGraph {
         let start: AVAudioTime?
         if let time, let rendered = mixer.lastRenderTime, rendered.isSampleTimeValid {
             let sampleRate = files[.stereo]!.processingFormat.sampleRate
-            let latest = ([rendered.sampleTime] + nodes.values.compactMap { $0.lastRenderTime?.sampleTime }).max()!
-            let lead = AVAudioFramePosition(ceil(max(0, time - deviceTime) * sampleRate * Double(timePitch.rate)))
-            start = AVAudioTime(sampleTime: latest + max(64, lead), atRate: sampleRate)
+            // The upstream render may precede the current host time by several quanta. Project
+            // from its OWN host timestamp, rather than pairing its frames with a later clock read.
+            let renderHost = AVAudioTime.seconds(forHostTime: rendered.hostTime)
+            let lead = AVAudioFramePosition(ceil(max(0, time - renderHost) * sampleRate * Double(timePitch.rate)))
+            start = AVAudioTime(sampleTime: rendered.sampleTime + max(64, lead), atRate: sampleRate)
         } else {
             start = time.map { AVAudioTime(hostTime: AVAudioTime.hostTime(forSeconds: $0)) }
         }
@@ -188,6 +196,12 @@ final class AudioEnginePlayer: AudioPlayerTransport {
     var enableRate: Bool { get { true } set { } }
     var isPlaying: Bool { graph.sourceIsPlaying(source) }
     var deviceCurrentTime: Double { graph.deviceTime }
+    func clockSnapshot() -> PlaybackClockSnapshot {
+        if graph.isPlaying, let snapshot = graph.inputClockSnapshot(), let position = snapshot.positions[source] {
+            return PlaybackClockSnapshot(position: position, deviceTime: AVAudioTime.seconds(forHostTime: snapshot.hostTime))
+        }
+        return PlaybackClockSnapshot(position: currentTime, deviceTime: deviceCurrentTime)
+    }
     func prepareToPlay() -> Bool { graph.prepare() }
     func play() -> Bool { graph.play(at: nil) }
     func play(atTime time: TimeInterval) -> Bool { graph.play(at: time) }
