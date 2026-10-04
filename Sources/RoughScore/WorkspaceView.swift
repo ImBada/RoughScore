@@ -135,7 +135,7 @@ struct WorkspaceView: View {
                         }.padding(10).background(workspace.lane == lane ? Palette.elevated : .clear, in: RoundedRectangle(cornerRadius: 8))
                     }.buttonStyle(.plain)
                 }
-                Text("L/R은 원본 채널입니다.\n기타 파트 분리를 뜻하지 않습니다.")
+                Text("L/R은 선택한 파일의 채널입니다.\n기타 파트 분리를 뜻하지 않습니다.")
                     .font(.system(size: 10)).foregroundStyle(Palette.secondary).lineSpacing(3).fixedSize(horizontal: false, vertical: true)
             }
             Divider()
@@ -168,23 +168,7 @@ struct WorkspaceView: View {
                 Text("깨끗한 단음용 · 확률/운지/리듬 추정 없음").font(.system(size: 9)).foregroundStyle(Palette.secondary)
             }
             Spacer(minLength: 10)
-            VStack(alignment: .leading, spacing: 8) {
-                Label("기타 스템", systemImage: "waveform").font(.system(size: 12, weight: .medium))
-                Text(workspace.stemConnection)
-                    .font(.system(size: 10)).foregroundStyle(Palette.secondary).lineSpacing(3)
-                Button(workspace.project.stemAsset == nil ? "스템 연결…" : "스템 다시 연결…") { workspace.importStem() }.font(.system(size: 10))
-                    .disabled(workspace.busy || workspace.analyzing)
-                HStack {
-                    Button("원곡") { workspace.switchAsset(.original) }
-                        .disabled(workspace.assetRole == .original)
-                    Button("Stem") { workspace.switchAsset(.importedGuitarStem) }
-                        .disabled(workspace.project.stemAsset == nil || workspace.assetRole == .importedGuitarStem)
-                }.font(.system(size: 10)).disabled(!workspace.canLoad)
-                if let stem = workspace.project.stemAsset {
-                    StemOffsetControl(workspace: workspace, offset: stem.originalTimeOffset)
-                    Button("스템 연결 해제") { workspace.detachStem() }.font(.system(size: 10)).disabled(!workspace.canLoad)
-                }
-            }.padding(12).background(Palette.elevated.opacity(0.65), in: RoundedRectangle(cornerRadius: 8))
+            StemControls(workspace: workspace)
             HStack {
                 Button("프로젝트 열기") { workspace.openProject() }
                 Spacer()
@@ -275,9 +259,9 @@ struct WorkspaceView: View {
 
     private var audioConnectionBar: some View {
         HStack {
-            Text(workspace.audioConnection).lineLimit(1).foregroundStyle(Palette.secondary)
+            Text((workspace.assetRole == .original ? "원곡 · " : "Stem · ") + (workspace.assetRole == .original ? workspace.audioConnection : workspace.stemConnection)).lineLimit(1).foregroundStyle(Palette.secondary)
             Spacer()
-            Button(workspace.prepared == nil ? "오디오 다시 연결…" : "오디오 교체…") { workspace.importAudio(relink: true) }
+            Button("원곡 다시 연결…") { workspace.importAudio(relink: true) }
                 .disabled(!workspace.canLoad)
         }.font(.system(size: 10)).buttonStyle(.borderless)
     }
@@ -618,25 +602,5 @@ private struct EntryIntervalControl: View {
                     Text("ms")
                 }.font(.system(size: 11)).padding(14)
             }
-    }
-}
-
-private struct StemOffsetControl: View {
-    @ObservedObject var workspace: Workspace
-    let offset: Double
-    @State private var text = ""
-    var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text("오프셋 · 원곡 = 파일 초 + 값").font(.system(size: 9))
-            HStack {
-                TextField("초", text: $text).textFieldStyle(.roundedBorder)
-                    .accessibilityLabel("스템 오프셋 · 초")
-                Button("적용") {
-                    if let value = Double(text) { _ = workspace.setStemOffset(value) }
-                }.disabled(Double(text) == nil || !workspace.canLoad)
-            }
-            Text("250ms 패딩: -0.250 · 자동 정렬 없음").font(.system(size: 9)).foregroundStyle(Palette.secondary)
-        }.onAppear { text = String(format: "%.6f", offset) }
-         .onChange(of: offset) { _, value in text = String(format: "%.6f", value) }
     }
 }

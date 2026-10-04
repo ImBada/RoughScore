@@ -107,7 +107,7 @@ final class Workspace: ObservableObject {
         guard let event = selected, let audio = prepared else { return nil }
         return SelectedPitchContext(projectID: projectIdentity, event: event, directory: audio.directory,
             audioURL: event.lane == .left ? audio.left : audio.right, source: source, lane: lane, cursor: cursor,
-            duration: project.duration, tuning: project.tuning, tuningDefinition: project.tuningDefinition, stemState: stemState)
+            duration: project.duration, tuning: project.tuning, tuningDefinition: project.tuningDefinition)
     }
     private func ownsPitchRequest(_ id: UUID, context: SelectedPitchContext) -> Bool {
         !closed && !Task.isCancelled && pitchRequestID == id && selectedPitchContext == context
@@ -268,12 +268,17 @@ final class Workspace: ObservableObject {
     func detectSelectedPitch() -> Task<Void, Never>? {
         guard canMutateNotes, let context = selectedPitchContext else { return nil }
         clearPitchDetection()
+        let audio = prepared
         let id = UUID()
         pitchRequestID = id; detectingPitch = true
         let task = Task {
             defer { if pitchRequestID == id { detectingPitch = false; pitchTask = nil } }
             do {
                 let result = try await services.detectPitch(context.audioURL, context.event.time)
+                guard ownsPitchRequest(id, context: context) else { return }
+                if let audio, let identity = audio.identity {
+                    guard try await AudioPreparation.fingerprint(audio.original) == identity.sha256 else { throw AudioIssue.sourceChanged }
+                }
                 guard ownsPitchRequest(id, context: context) else { return }
                 detectedPitch = result
                 pitchDetectionMessage = result == nil ? "안정된 단음 음고 없음 · 직접 입력 가능" : "단음 추정 · 반음 반올림 · 운지는 직접 선택"
@@ -1089,7 +1094,7 @@ final class Workspace: ObservableObject {
         refreshSaveState()
         scheduleAutosave()
     }
-    private func editSnapshot(preservingCursor: Bool = false) -> EditSnapshot {
+    private func editSnapshot(preservingCursor: Bool = false, stemState: StemState? = nil) -> EditSnapshot {
         EditSnapshot(events: project.events, selectedID: selectedID, selection: selection, selectionRange: selectionRange,
                      cursor: preservingCursor ? cursor : nil, activeString: activeString,
                      tuning: project.tuning, tuningDefinition: project.tuningDefinition, stemState: stemState)
@@ -1100,6 +1105,7 @@ final class Workspace: ObservableObject {
     }
     /// Await the currently scheduled revision; callers still inspect durable bytes and dirty state.
     func awaitAutosave() async { await autosaveTask?.value }
+    func awaitLoading() async { await loadTask?.value }
 
     private func scheduleAutosave() {
         autosaveTask?.cancel(); autosaveTask = nil
@@ -1309,6 +1315,7 @@ final class Workspace: ObservableObject {
                     $0.identity == staged.asset.identity && $0.reference == staged.asset.reference &&
                     $0.originalTimeOffset != staged.asset.originalTimeOffset
                 } ?? false
+                try requireCurrent(operation)
                 let previousState = currentStemState()
                 // Bound offset undo to one retired streaming cache. Ordinary note history stays intact.
                 undoHistory.removeAll { $0.stemState != nil }; redoHistory.removeAll { $0.stemState != nil }
@@ -1355,7 +1362,12 @@ final class Workspace: ObservableObject {
         guard let audio = role == .original ? originalAudio : stemAudio else {
             error = "연결된 오디오를 사용할 수 없습니다 · 다시 연결하세요"; return false
         }
-        let layout = scoreLayout, old = player, resume = playing
+        let layout = scoreLayout, old = player
+        let identity = projectIdentity, oldDirectory = prepared?.directory, previousRole = assetRole, channel = source
+        func requireHandover() throws {
+            guard canMutateNotes, projectIdentity == identity, prepared?.directory == oldDirectory,
+                  self.player === old, assetRole == previousRole, source == channel else { throw CancellationError() }
+        }
         var group = inactivePlayers
         do {
             for channel in ListeningSource.allCases where group[channel] == nil {
@@ -1364,9 +1376,12 @@ final class Workspace: ObservableObject {
                 guard t.prepareToPlay() else { throw AudioIssue.playbackFailed }
                 group[channel] = PreparedPlayer(transport: t, volume: volume)
             }
-            guard let destination = group[source]?.transport else { throw AudioIssue.playbackFailed }
+            try requireHandover()
+            guard let destination = group[channel]?.transport else { throw AudioIssue.playbackFailed }
             let sampled = livePlayerTime(old)
-            let time = looping && sampled >= loopEnd ? loopStart : boundedPlaybackTime(sampled)
+            let loopWrap = looping && sampled >= loopEnd
+            let resume = playing && (old?.isPlaying == true || loopWrap)
+            let time = loopWrap ? loopStart : boundedPlaybackTime(sampled)
             for cached in group.values { cached.transport.volume = 0; cached.transport.rate = rate; cached.transport.currentTime = time }
             let epoch = destination.deviceCurrentTime + 0.02
             if resume {
@@ -1374,6 +1389,7 @@ final class Workspace: ObservableObject {
                     guard cached.transport.play(atTime: epoch), cached.transport.isPlaying else { throw AudioIssue.playbackFailed }
                 }
             }
+            try requireHandover()
             pausePlayers()
             // Set every old gain to zero before exposing the new group.
             preparedPlayers.values.forEach { $0.transport.volume = 0 }
@@ -1387,7 +1403,7 @@ final class Workspace: ObservableObject {
             return true
         } catch {
             group.values.forEach { $0.transport.pause(); $0.transport.volume = 0 }
-            self.error = error.localizedDescription
+            if !closed, projectIdentity == identity { self.error = error.localizedDescription }
             return false
         }
     }
@@ -1504,9 +1520,17 @@ final class Workspace: ObservableObject {
             staged = StagedWorkspace(project: loaded.invalidatingUnverifiedAnalysis(fingerprint: nil), status: "오디오 경로를 찾을 수 없습니다 · TAB은 오프라인으로 편집할 수 있습니다",
                 offlineReason: "연결된 오디오를 찾을 수 없습니다")
         }
+        var retained = false
+        defer {
+            if !retained {
+                for audio in [staged.audio, staged.stemAudio].compactMap({ $0 }) {
+                    try? FileManager.default.removeItem(at: audio.directory)
+                }
+            }
+        }
         if let asset = loaded.stemAsset {
             do {
-                staged.stemAudio = try await prepareStem(asset.reference.path, asset: asset, duration: loaded.duration,
+                staged.stemAudio = try await prepareStem(asset.reference.path, asset: asset, duration: staged.project.duration,
                     requireIdentity: true, operation: operation).audio
             } catch {
                 try requireCurrent(operation)
@@ -1522,6 +1546,7 @@ final class Workspace: ObservableObject {
             }
         }
         staged.projectURL = url; staged.fromDisk = true; staged.baseline = loaded
+        retained = true
         return staged
     }
 

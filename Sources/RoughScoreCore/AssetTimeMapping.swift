@@ -9,7 +9,8 @@ public struct AssetTimeMapping: Equatable, Sendable {
     public let originalDuration: Double
     public init(asset: AudioAsset, originalDuration: Double) throws {
         _ = try asset.validated()
-        guard let identity = asset.identity, originalDuration.isFinite, originalDuration > 0 else { throw ProjectError.invalidData }
+        guard let identity = asset.identity, originalDuration.isFinite, originalDuration > 0, originalDuration <= 86_400,
+              identity.sampleRate <= 768_000, Double(identity.frameCount) / identity.sampleRate <= 86_400 else { throw ProjectError.invalidData }
         offset = asset.originalTimeOffset; sampleRate = identity.sampleRate
         frameCount = identity.frameCount; self.originalDuration = originalDuration
     }
