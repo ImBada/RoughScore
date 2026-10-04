@@ -9,8 +9,8 @@ import Testing
 struct DeferredHandoverRegressionHarness {
     let helper = StemReviewHarness()
     func record(_ name: String, _ row: [String:Any]) throws { try helper.record("deferred-"+name,row) }
-    func setup() async throws -> (Workspace, StemReviewCapture, DeferredRegressionControl) {
-        let o=try helper.fixture("deferred-original",duration:6,rate:44100),s=try helper.fixture("deferred-stem",duration:6,padding:0.25)
+    func setup(duration: Double = 6) async throws -> (Workspace, StemReviewCapture, DeferredRegressionControl) {
+        let o=try helper.fixture("deferred-original",duration:duration,rate:44100),s=try helper.fixture("deferred-stem",duration:duration,padding:0.25)
         let cap=StemReviewCapture(),control=DeferredRegressionControl();var service=helper.services(cap);let make=service.makePlayer
         service.makePlayer={url in DeferredRegressionPort(native:try make(url),url:url,control:control)}
         let w=Workspace(services:service)
@@ -51,16 +51,28 @@ struct DeferredHandoverRegressionHarness {
         #expect(abs(error)<=0.015,"Pending rate change must preserve native original-time clock within unchanged 15ms tolerance")
     }
     func offsetCommitDoesNotStopOutgoingStemBeforeOriginalEpoch() async throws {
-        let (w,cap,control)=try await setup();defer{w.shutdown()}
+        // Native VM setup can outlast the short EOF fixture. Keep this cutover fixture live;
+        // the separate EOF probe still uses six seconds and the same clock assertions.
+        let (w,cap,control)=try await setup(duration: 60);defer{w.shutdown()}
         #expect(w.switchAsset(.importedGuitarStem));try await Task.sleep(for:.milliseconds(150))
         let stem=try #require(cap.players[w.prepared!.url(for:.stereo)])
+        #expect(stem.isPlaying)
+        control.monitoredStem = stem.sharedClockID
+        // The capture maps URLs to each native channel; select Original's stereo clock directly.
+        control.originalPlayer = cap.players.first { control.originalURLs.contains($0.key) && $0.value.source == .stereo }?.value
         #expect(await w.setStemOffset(-0.5)?.value==true)
         let original=try #require(cap.players[w.prepared!.url(for:.stereo)])
         let epoch=try #require(control.epochs[original.graph.id]);let remaining=epoch-original.deviceCurrentTime
         let clock=try #require(original.graph.inputClockSnapshot())
         try record("offset-commit",["remainingUntilOriginalEpochSeconds":remaining,"originalInputFrames":clock.playerFrames.values.map{Int($0)},"outgoingStemIsPlaying":stem.isPlaying,"outgoingStemNativeGain":stem.graph.nativeGains[.stereo]!,"offset":w.project.stemAsset!.originalTimeOffset])
-        #expect(remaining>0.015)
-        #expect(stem.isPlaying && stem.graph.nativeGains[.stereo]==1,"Offset publication must keep outgoing Stem alive until actual Original epoch")
+        #expect(control.earlyStemRetirements.isEmpty, "Offset Apply must not mute/pause/stop its audible Stem before Original's native epoch")
+        if remaining > 0 {
+            #expect(stem.isPlaying && stem.graph.nativeGains[.stereo]==1,"Offset publication must keep outgoing Stem alive until actual Original epoch")
+        }
+        try await Task.sleep(for: .seconds(max(0, epoch - original.deviceCurrentTime) + 0.05))
+        let after = try #require(original.graph.inputClockSnapshot())
+        #expect(original.isPlaying && after.playerFrames[.stereo, default: 0] > 0)
+        #expect(!stem.isPlaying && stem.graph.nativeGains[.stereo] == 0)
     }
     func successfulRapidReversalKeepsAudibleClockAndDoesNotAdvanceFrozenPendingTime() async throws {
         let (w,cap,control)=try await setup();defer{w.shutdown()}
@@ -154,20 +166,33 @@ struct DeferredHandoverRegressionHarness {
     }
 
 }
-@MainActor final class DeferredRegressionControl {var originalURLs:Set<URL>=[];var failOriginalPlay=false;var epochs:[UUID:Double]=[:]}
+@MainActor final class DeferredRegressionControl {
+    var originalURLs: Set<URL> = []
+    var failOriginalPlay = false
+    var epochs: [UUID: Double] = [:]
+    var monitoredStem: UUID?
+    var originalPlayer: AudioEnginePlayer?
+    var earlyStemRetirements: [Double] = []
+    func retiring(_ native: any AudioPlayerTransport) {
+        guard native.sharedClockID == monitoredStem, let originalPlayer,
+              let epoch = epochs[originalPlayer.graph.id] else { return }
+        let remaining = epoch - originalPlayer.deviceCurrentTime
+        if remaining > 0 { earlyStemRetirements.append(remaining) }
+    }
+}
 @MainActor final class DeferredRegressionPort:AudioPlayerTransport {
     let native:any AudioPlayerTransport;let url:URL;let control:DeferredRegressionControl
     init(native:any AudioPlayerTransport,url:URL,control:DeferredRegressionControl){self.native=native;self.url=url;self.control=control}
     var currentTime:Double{get{native.currentTime}set{native.currentTime=newValue}}
     var rate:Float{get{native.rate}set{native.rate=newValue}}
-    var volume:Float{get{native.volume}set{native.volume=newValue}}
+    var volume:Float{get{native.volume}set{if native.volume > 0 && newValue == 0 {control.retiring(native)};native.volume=newValue}}
     var enableRate:Bool{get{native.enableRate}set{native.enableRate=newValue}}
     var isPlaying:Bool{native.isPlaying};var deviceCurrentTime:Double{native.deviceCurrentTime};var sharedClockID:UUID?{native.sharedClockID}
     func clockSnapshot()->PlaybackClockSnapshot{native.clockSnapshot()}
     func prepareToPlay()->Bool{native.prepareToPlay()}
     func play()->Bool{!(control.failOriginalPlay && control.originalURLs.contains(url)) && native.play()}
     func play(atTime t:Double)->Bool{if let id=sharedClockID {control.epochs[id]=t};return !(control.failOriginalPlay && control.originalURLs.contains(url)) && native.play(atTime:t)}
-    func pause(){native.pause()};func stop(){native.stop()}
+    func pause(){control.retiring(native);native.pause()};func stop(){control.retiring(native);native.stop()}
 }
 
 extension StemWorkspaceTests {
