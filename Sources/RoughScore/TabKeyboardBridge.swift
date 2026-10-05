@@ -50,6 +50,17 @@ final class TabKeyboardView: NSView {
     override func selectAll(_ sender: Any?) { workspace?.selectAllInLane() }
     @objc func duplicate(_ sender: Any?) { _ = workspace?.duplicateSelection() }
     override var acceptsFirstResponder: Bool { true }
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        // AppKit offers Control-Tab/backtab as a key equivalent before keyDown.
+        // Claim it only while this editor owns the responder, before native traversal.
+        guard window?.firstResponder === self, let workspace,
+              editorID == nil || editorID == workspace.editorIdentity,
+              event.keyCode == 48, event.modifierFlags.contains(.control),
+              !event.modifierFlags.contains(.option), !event.modifierFlags.contains(.command) else {
+            return super.performKeyEquivalent(with: event)
+        }
+        return workspace.requestControlFocus?(event.modifierFlags.contains(.shift)) ?? false
+    }
     override func flagsChanged(with event: NSEvent) {
         workspace?.updatePositionModifiers(shift: event.modifierFlags.contains(.shift))
         super.flagsChanged(with: event)
