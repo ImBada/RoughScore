@@ -80,7 +80,7 @@ struct ScoreSheetView: View {
                                                    measuresPerSystem: workspace.measuresPerSystem, systemsPerPage: previous ? 2 : 4))
         }
         .onChange(of: workspace.project.analyses) { previous, _ in
-            let summary = previous["stereo"] ?? previous[workspace.source.rawValue] ?? previous["left"] ?? previous["right"]
+            let summary = workspace.scoreSummary(in: previous)
             workspace.reflowScore(from: ScoreLayout(duration: workspace.project.duration, bars: summary?.bars ?? [],
                                                    measuresPerSystem: workspace.measuresPerSystem, systemsPerPage: workspace.showBothLanes ? 2 : 4))
         }

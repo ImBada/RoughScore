@@ -10,7 +10,7 @@ public enum ListeningSource: String, CaseIterable, Sendable, Identifiable {
     case stereo, left, right
     public var id: String { rawValue }
     public var title: String {
-        switch self { case .stereo: "원곡 · Stereo"; case .left: "왼쪽 · L"; case .right: "오른쪽 · R" }
+        switch self { case .stereo: "Stereo"; case .left: "왼쪽 · L"; case .right: "오른쪽 · R" }
     }
 }
 
@@ -87,7 +87,8 @@ public struct ScoreProject: Codable, Equatable, Sendable {
               tuning.count == 6, Set(events.map(\.id)).count == events.count else { throw ProjectError.invalidData }
         if let assets {
             guard Set(assets.map(\.id)).count == assets.count,
-                  assets.filter({ $0.role == .original }).count == 1 else { throw ProjectError.invalidData }
+                  assets.filter({ $0.role == .original }).count == 1,
+                  assets.filter({ $0.role == .importedGuitarStem }).count <= 1 else { throw ProjectError.invalidData }
             for asset in assets { _ = try asset.validated() }
             if let original = originalAsset, original.reference.kind == .external,
                original.reference.path != audioPath { throw ProjectError.invalidData }
@@ -101,7 +102,7 @@ public struct ScoreProject: Codable, Equatable, Sendable {
         for (channel, summary) in analyses {
             if let provenance = summary.provenance {
                 _ = try provenance.validated()
-                guard provenance.channel == channel,
+                guard provenance.channel == channel || channel == "\(provenance.assetID.uuidString):\(provenance.channel)",
                       assets?.contains(where: { $0.id == provenance.assetID && $0.identity == provenance.identity }) == true
                 else { throw ProjectError.invalidData }
             }
@@ -141,6 +142,33 @@ public struct ScoreProject: Codable, Equatable, Sendable {
         return value <= 127 ? value : nil
     }
 
+    public var stemAsset: AudioAsset? { assets?.first { $0.role == .importedGuitarStem } }
+    public func analysisKey(asset: AudioAsset?, channel: ListeningSource) -> String {
+        guard let asset, asset.role != .original else { return channel.rawValue }
+        return "\(asset.id.uuidString):\(channel.rawValue)"
+    }
+    public func attachingStem(_ stem: AudioAsset) throws -> Self {
+        guard stem.role == .importedGuitarStem else { throw ProjectError.invalidData }
+        var result = self
+        if result.assets == nil {
+            guard let audioPath else { throw ProjectError.invalidData }
+            result.assets = [AudioAsset(reference: AudioReference(path: audioPath))]
+        }
+        let previous = stemAsset
+        result.assets = (result.assets ?? []).filter { $0.role != .importedGuitarStem } + [stem]
+        if let previous, previous.identity != stem.identity || previous.originalTimeOffset != stem.originalTimeOffset {
+            result.analyses = result.analyses.filter { $0.value.provenance?.assetID != previous.id }
+        }
+        return try result.validated()
+    }
+    public func detachingStem() throws -> Self {
+        var result = self
+        let id = stemAsset?.id
+        result.assets = assets?.filter { $0.role != .importedGuitarStem }
+        result.analyses = analyses.filter { $0.value.provenance?.assetID != id }
+        return try result.validated()
+    }
+
     public var resolvedTuning: TuningDefinition? {
         let value = tuningDefinition ?? (tuning == ["E", "B", "G", "D", "A", "E"] ? .standard : nil)
         return value.flatMap { try? $0.validated() }
@@ -167,12 +195,14 @@ public struct ScoreProject: Codable, Equatable, Sendable {
         let previous = originalAsset
         let original = AudioAsset(id: previous?.id ?? UUID(), reference: AudioReference(path: path), identity: identity)
         let sameContent = identity != nil && previous?.identity == identity
-        candidate.analyses = sameContent ? analyses.filter { channel, summary in
+        candidate.analyses = analyses.filter { channel, summary in
+            if let p = summary.provenance, p.assetID != previous?.id { return true }
+            guard sameContent else { return false }
             guard let p = summary.provenance else { return false }
             return p.assetID == original.id && p.identity == identity && p.channel == channel &&
                 (summary.beats + summary.bars).allSatisfy { $0 <= duration } &&
                 (summary.sections + summary.otherInstrumentRanges).allSatisfy { $0.end <= duration }
-        } : [:]
+        }
         // Imported files are independently owned. Future derived/model assets must also carry proven provenance.
         candidate.assets = [original] + (assets ?? []).filter { $0.role != .original }
         candidate.duration = duration; candidate.audioPath = path

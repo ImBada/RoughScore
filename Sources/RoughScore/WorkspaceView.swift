@@ -135,7 +135,7 @@ struct WorkspaceView: View {
                         }.padding(10).background(workspace.lane == lane ? Palette.elevated : .clear, in: RoundedRectangle(cornerRadius: 8))
                     }.buttonStyle(.plain)
                 }
-                Text("L/R은 원본 채널입니다.\n기타 파트 분리를 뜻하지 않습니다.")
+                Text("L/R은 선택한 파일의 채널입니다.\n기타 파트 분리를 뜻하지 않습니다.")
                     .font(.system(size: 10)).foregroundStyle(Palette.secondary).lineSpacing(3).fixedSize(horizontal: false, vertical: true)
             }
             Divider()
@@ -151,17 +151,24 @@ struct WorkspaceView: View {
                     Button { workspace.analyze() } label: { Label("현재 소스 분석", systemImage: "sparkle") }
                         .font(.system(size: 11)).disabled(!workspace.canAnalyze)
                 }
-                Text("원곡 · L · R 결과를 따로 보관\n분석 결과는 TAB을 생성하지 않습니다.")
+                Text("현재 자산의 Stereo · L · R 결과 보관\n분석 결과는 TAB을 생성하지 않습니다.")
                     .font(.system(size: 10)).foregroundStyle(Palette.secondary).lineSpacing(3).fixedSize(horizontal: false, vertical: true)
             }
+            if workspace.source != .stereo {
+                Button("실험적 단음 후보 · 현재 구간") {
+                    workspace.proposePitches(from: workspace.windowStart,
+                        to: min(workspace.windowEnd, workspace.windowStart + 60))
+                }.font(.system(size: 10)).disabled(workspace.prepared == nil || workspace.analyzing || workspace.busy)
+                ForEach(Array(workspace.pitchProposals.prefix(6).enumerated()), id: \.offset) { _, proposal in
+                    Text(String(format: "%.3fs · ", proposal.onset) +
+                        (proposal.frequencyHz.map { String(format: "%.1fHz", $0) } ?? "음 미확인") +
+                        (proposal.qualified ? " · 규칙 통과" : " · 불확실"))
+                        .font(.system(size: 9)).foregroundStyle(Palette.secondary)
+                }
+                Text("깨끗한 단음용 · 확률/운지/리듬 추정 없음").font(.system(size: 9)).foregroundStyle(Palette.secondary)
+            }
             Spacer(minLength: 10)
-            VStack(alignment: .leading, spacing: 8) {
-                Label("기타 스템", systemImage: "waveform").font(.system(size: 12, weight: .medium))
-                Text("기타 분리 모델 연결 예정\n이미 분리한 파일도 열 수 있습니다.")
-                    .font(.system(size: 10)).foregroundStyle(Palette.secondary).lineSpacing(3)
-                Button("분리된 파일 열기…") { workspace.importAudio() }.font(.system(size: 10))
-                    .disabled(workspace.busy || workspace.analyzing)
-            }.padding(12).background(Palette.elevated.opacity(0.65), in: RoundedRectangle(cornerRadius: 8))
+            StemControls(workspace: workspace)
             HStack {
                 Button("프로젝트 열기") { workspace.openProject() }
                 Spacer()
@@ -252,9 +259,9 @@ struct WorkspaceView: View {
 
     private var audioConnectionBar: some View {
         HStack {
-            Text(workspace.audioConnection).lineLimit(1).foregroundStyle(Palette.secondary)
+            Text((workspace.assetRole == .original ? "원곡 · " : "Stem · ") + (workspace.assetRole == .original ? workspace.audioConnection : workspace.stemConnection)).lineLimit(1).foregroundStyle(Palette.secondary)
             Spacer()
-            Button(workspace.prepared == nil ? "오디오 다시 연결…" : "오디오 교체…") { workspace.importAudio(relink: true) }
+            Button("원곡 다시 연결…") { workspace.importAudio(relink: true) }
                 .disabled(!workspace.canLoad)
         }.font(.system(size: 10)).buttonStyle(.borderless)
     }
