@@ -11,6 +11,7 @@ final class ExternalProjectIntake {
     private var boundIdentity: ObjectIdentifier?
     private var pending: Request?
     private var requestID: UUID?
+    private var feedbackOwner: UUID?
     private var closed = false
     private var terminating = false
     private(set) var task: Task<Bool, Never>?
@@ -51,9 +52,10 @@ final class ExternalProjectIntake {
         }
         // A new accepted request supersedes earlier feedback. Later rejected requests
         // keep their own message, including requests rejected before the first bind.
+        let request = Request(url: url)
+        feedbackOwner = request.id
         lastRejection = nil
         workspace?.externalOpenError = nil
-        let request = Request(url: url)
         guard let workspace else { pending = request; return .queued }
         return begin(request, workspace: workspace)
     }
@@ -100,7 +102,10 @@ final class ExternalProjectIntake {
                 self.requestID = nil; self.task = nil
                 self.lastCompletion = opened ? .opened : .notOpened
                 // Load failure details stay in Workspace.error; no focus/reset on failure.
-                if !opened { owner.externalOpenError = "프로젝트를 열지 못했습니다. 이전 작업을 유지했습니다. " + (owner.error ?? "열기가 취소되었습니다.") }
+                // A later rejected request owns its retry feedback even when this load fails.
+                if !opened, self.feedbackOwner == request.id {
+                    owner.externalOpenError = "프로젝트를 열지 못했습니다. 이전 작업을 유지했습니다. " + (owner.error ?? "열기가 취소되었습니다.")
+                }
                 return opened
             }
             task = completion
@@ -109,6 +114,7 @@ final class ExternalProjectIntake {
     }
 
     private func reject(_ message: String) -> Admission {
+        feedbackOwner = UUID()
         lastRejection = message
         workspace?.externalOpenError = message
         return .rejected
