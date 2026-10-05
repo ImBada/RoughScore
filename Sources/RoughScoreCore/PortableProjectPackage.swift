@@ -151,13 +151,14 @@ public enum PortableProjectPackage {
         do {
             try AtomicDocumentPublication.replace(stagingParent: parent.fd, stagedName: name,
                 destinationParent: read.fence.directory.fd, destinationName: "project.json",
-                recoveryURL: parentURL.appendingPathComponent(name),
                 verifyOld: { try AtomicDocumentPublication.matchesFile(parent: $0, name: $1, receipt: oldDocument.info, bytes: oldBytes) },
                 verifyNew: { try AtomicDocumentPublication.matchesFile(parent: $0, name: $1, receipt: writtenInfo, bytes: data) },
                 removeOld: { if parent.matches(name, oldDocument.info) { _ = unlinkat(parent.fd, name, 0) } },
+                bindingsValid: { parent.isAt(parentURL) && read.fence.directory.isAt(expected.root) },
+                verifyContext: { try read.fence.metadataResourcesIntact(hooks: hooks) },
                 beforePublication: { try hooks.checkpoint(.publishing) }, beforeRollback: { try hooks.checkpoint(.rollingBack) })
         } catch let conflict as AtomicDocumentPublication.Conflict {
-            retainStage = conflict.recoveryURL != nil
+            retainStage = conflict.retained
             throw conflict
         }
         return Snapshot(root: expected.root, project: candidate, directory: read.fence.directory.info, document: file.info)
@@ -279,15 +280,16 @@ public enum PortableProjectPackage {
             guard parent.matches(destinationName, previous.fence.directory.info) else { throw PackageError.sourceChanged }
             do {
                 try AtomicDocumentPublication.replace(stagingParent: parent.fd, stagedName: stageName,
-                    destinationParent: parent.fd, destinationName: destinationName, recoveryURL: stageURL,
+                    destinationParent: parent.fd, destinationName: destinationName,
                     verifyOld: { try previous.fence.matchesContents(parent: $0, name: $1) },
                     verifyNew: { try validated.fence.matchesContents(parent: $0, name: $1) },
                     removeOld: {
                         previous.fence.removeVerifiedEntries()
                         if parent.matches(stageName, previous.fence.directory.info) { _ = unlinkat(parent.fd, stageName, AT_REMOVEDIR) }
-                    }, beforePublication: { try hooks.checkpoint(.publishing) }, beforeRollback: { try hooks.checkpoint(.rollingBack) })
+                    }, bindingsValid: { parent.isAt(parentURL) },
+                    beforePublication: { try hooks.checkpoint(.publishing) }, beforeRollback: { try hooks.checkpoint(.rollingBack) })
             } catch let conflict as AtomicDocumentPublication.Conflict {
-                committed = conflict.recoveryURL != nil // Keep every entry of an unexpected retained version.
+                committed = conflict.retained // Keep every entry of an unexpected retained version.
                 throw conflict
             }
             committed = true
@@ -370,6 +372,19 @@ public enum PortableProjectPackage {
         let directory: Directory
         let files: [(String, File)]
         let directories: [(String, Directory)]
+        func metadataResourcesIntact(hooks: Hooks) throws -> Bool {
+            for (path, file) in files where path != "project.json" {
+                guard file.unchanged, sameState(try directory.file(path).info, file.info) else { return false }
+            }
+            for (name, child) in directories {
+                guard child.unchanged, directory.matches(name, child.info) else { return false }
+            }
+            // JSON exchange legitimately changes the root's timestamps. Anchor a fresh descriptor
+            // for strict tree enumeration while preserving every original media/directory receipt.
+            let current = try Directory(parent: directory, name: ".")
+            _ = try current.validateTree(expected: Set(files.map { $0.0 }), cancellation: {}, hooks: hooks)
+            return true
+        }
         func matchesContents(parent: Int32, name: String) throws -> Bool {
             var entry = stat()
             guard fstatat(parent, name, &entry, AT_SYMLINK_NOFOLLOW) == 0,

@@ -164,4 +164,59 @@ struct LateDocumentPublicationTests {
         #expect(try JSONDecoder().decode(ScoreProject.self, from: Data(contentsOf: linked)) == w.project)
         #expect(w.activeProjectURL == package && !w.dirty)
     }
+
+    @Test(arguments: ["file", "directory", "symlink"])
+    func metadataRejectsLateUndeclaredEntriesWithoutDeletingThem(kind: String) throws {
+        let root = try root(); defer { try? FileManager.default.removeItem(at: root) }
+        let initial = try PortableProjectPackage.collect(ScoreProject(title: "baseline", duration: 20),
+            to: root.appendingPathComponent("active.roughscorepkg"))
+        let json = initial.root.appendingPathComponent("project.json"), old = try Data(contentsOf: json)
+        let foreign = initial.root.appendingPathComponent("undeclared"), target = root.appendingPathComponent("target.txt")
+        let bytes = Data("foreign data".utf8); try bytes.write(to: target)
+        var candidate = initial.project; candidate.title = "our edit"
+        #expect(throws: AtomicDocumentPublication.Conflict.self) {
+            _ = try PortableProjectPackage.update(candidate, replacing: initial, hooks: .init(checkpoint: {
+                if $0 == .publishing {
+                    if kind == "directory" { try FileManager.default.createDirectory(at: foreign, withIntermediateDirectories: false) }
+                    else if kind == "symlink" { try FileManager.default.createSymbolicLink(at: foreign, withDestinationURL: target) }
+                    else { try bytes.write(to: foreign) }
+                }
+            }))
+        }
+        #expect(try Data(contentsOf: json) == old)
+        #expect(FileManager.default.fileExists(atPath: foreign.path))
+        #expect(try Data(contentsOf: target) == bytes)
+        if kind == "file" { #expect(try Data(contentsOf: foreign) == bytes) }
+    }
+
+    @Test func rollbackReportsActualLocationsAfterParentMoves() throws {
+        let root = try root(); defer { try? FileManager.default.removeItem(at: root) }
+        let parent = root.appendingPathComponent("parent"), moved = root.appendingPathComponent("moved")
+        try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: false)
+        let destination = parent.appendingPathComponent("active.roughscore")
+        let baseline = ScoreProject(title: "baseline", duration: 20)
+        try JSONEncoder().encode(baseline).write(to: destination)
+        var candidate = baseline; candidate.title = "our edit"
+        let first = Data("first external".utf8), second = Data("second external".utf8), unrelated = Data("unrelated new parent".utf8)
+        var conflict: AtomicDocumentPublication.Conflict?
+        do {
+            try LinkedProjectWriter.replace(JSONEncoder().encode(candidate), at: destination, expected: baseline,
+                write: { try $0.write(to: $1) }, cancellation: {}, beforePublication: {
+                    try first.write(to: destination, options: .atomic)
+                }, beforeRollback: {
+                    try second.write(to: destination, options: .atomic)
+                    try FileManager.default.moveItem(at: parent, to: moved)
+                    try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: false)
+                    try unrelated.write(to: destination)
+                })
+            Issue.record("Expected a publication conflict")
+        } catch let error as AtomicDocumentPublication.Conflict { conflict = error }
+        let recovery = try #require(conflict?.recoveryURL), restored = try #require(conflict?.restoredAtURL)
+        #expect(conflict?.restored == false && conflict?.retained == true)
+        #expect(try Data(contentsOf: destination) == unrelated)
+        #expect(try Data(contentsOf: restored) == first)
+        #expect(try Data(contentsOf: recovery) == second)
+        #expect(restored.deletingLastPathComponent().path == moved.path)
+        #expect(conflict?.errorDescription?.contains(restored.path) == true)
+    }
 }

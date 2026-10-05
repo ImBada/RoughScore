@@ -79,16 +79,17 @@ enum LinkedProjectWriter {
               sameState(stagedNow, written) else { throw CocoaError(.fileWriteUnknown) }
         do {
             try AtomicDocumentPublication.replace(stagingParent: stage, stagedName: name,
-                destinationParent: parent, destinationName: name, recoveryURL: target,
+                destinationParent: parent, destinationName: name,
                 verifyOld: { try AtomicDocumentPublication.matchesFile(parent: $0, name: $1, receipt: oldInfo, bytes: before) },
                 verifyNew: { try AtomicDocumentPublication.matchesFile(parent: $0, name: $1, receipt: written, bytes: data) },
                 removeOld: {
                     var displaced = stat()
                     if fstatat(stage, name, &displaced, AT_SYMLINK_NOFOLLOW) == 0,
                        displaced.st_dev == oldInfo.st_dev, displaced.st_ino == oldInfo.st_ino { _ = unlinkat(stage, name, 0) }
-                }, beforePublication: beforePublication, beforeRollback: beforeRollback)
+                }, bindingsValid: { AtomicDocumentPublication.directoryIsAt(parent, url: parentURL) },
+                beforePublication: beforePublication, beforeRollback: beforeRollback)
         } catch let conflict as AtomicDocumentPublication.Conflict {
-            retainStage = conflict.recoveryURL != nil
+            retainStage = conflict.retained
             throw conflict
         }
     }
