@@ -15,7 +15,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // URL document delivery supersedes openFile/openFiles. It has no open/print reply contract.
     func application(_ application: NSApplication, open urls: [URL]) {
         _ = externalProjects.receive(urls)
-        showMainWindow?()
+        if externalProjects.allowsWindowPresentation { showMainWindow?() }
     }
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)

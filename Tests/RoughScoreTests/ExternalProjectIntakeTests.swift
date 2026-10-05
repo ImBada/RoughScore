@@ -352,10 +352,16 @@ struct ExternalProjectIntakeTests {
         queued.bind(w); #expect(!queued.hasPendingRequest && queued.receive([a]) == .rejected && w.busy)
         let gate = IntakeReadGate(); var s = try f.services(); s.readProject = { try await gate.read($0) }
         let d = AppDelegate(), live = Workspace(services: s, awaitsStartup: true)
-        d.application(NSApplication.shared, open: [a]); d.bind(live)
+        var shown = 0
+        d.application(NSApplication.shared, open: [a]); d.bind(live, showMainWindow: { shown += 1 })
         let task = try #require(d.externalProjects.task); await gate.started(a)
+        d.externalProjects.beginTermination()
+        d.application(NSApplication.shared, open: [a])
+        #expect(shown == 0)
+        d.externalProjects.cancelTermination()
         live.shutdown(); await gate.finish(a, ScoreProject(title: "late", duration: 20))
         #expect(!(await task.value) && d.externalProjects.receive([a]) == .rejected && f.capture.remembered.isEmpty)
+        d.application(NSApplication.shared, open: [a]); #expect(shown == 0)
         let replacement = Workspace(services: try f.services(), awaitsStartup: true); defer { replacement.shutdown() }
         d.bind(replacement); #expect(replacement.busy && replacement.activeProjectURL == nil)
     }

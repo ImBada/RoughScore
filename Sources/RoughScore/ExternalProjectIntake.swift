@@ -17,6 +17,7 @@ final class ExternalProjectIntake {
     private(set) var lastCompletion: Completion?
     private(set) var lastRejection: String?
     var hasPendingRequest: Bool { pending != nil }
+    var allowsWindowPresentation: Bool { !closed && !terminating && workspace?.isClosed != true }
 
     static func validate(_ urls: [URL]) throws -> URL {
         guard urls.count == 1 else { throw IntakeError("한 번에 프로젝트 하나만 열 수 있습니다. 파일 하나를 선택해 다시 시도하세요.") }
