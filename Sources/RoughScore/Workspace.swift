@@ -1989,14 +1989,16 @@ final class Workspace: ObservableObject {
             var session = (candidate.session ?? WorkspaceSession()).bounded(to: candidate.project, stemAvailable: candidate.stemAudio != nil)
             if candidate.isDemo { session.cursor = 2; session.loopStart = 2; session.loopEnd = min(6, candidate.project.duration) }
             var selectedPlayer = stagedPlayer
-            if let audio = candidate.audio,
+            let restoringStem = session.asset == "importedGuitarStem"
+            var originalChannel = restoringStem ? ListeningSource.stereo : (ListeningSource(rawValue: session.channel) ?? .stereo)
+            if !restoringStem, let audio = candidate.audio,
                let channel = ListeningSource(rawValue: session.channel), channel != .stereo {
                 do {
                     let transport = try services.makePlayer(audio, channel)
                     transport.enableRate = true; transport.rate = session.rate
                     guard transport.prepareToPlay() else { throw AudioIssue.playbackFailed }
                     selectedPlayer = transport
-                } catch { session.channel = "stereo" }
+                } catch { session.channel = "stereo"; originalChannel = .stereo }
             }
             // Channel preparation can fall back too; page bounds/follow use the channel actually parked.
             session = session.bounded(to: candidate.project, stemAvailable: candidate.stemAudio != nil)
@@ -2005,12 +2007,12 @@ final class Workspace: ObservableObject {
             flushSession()
             try requireCurrent(operation)
             restoringSession = true
-            activate(candidate, player: selectedPlayer, session: session)
+            activate(candidate, player: selectedPlayer, originalChannel: originalChannel, session: session)
             stemAudio = candidate.stemAudio; inactivePlayers = stemPlayers
             if session.asset == "importedGuitarStem", let stem = stemAudio,
                let channel = ListeningSource(rawValue: session.channel), let destination = stemPlayers[channel] {
                 inactivePlayers = preparedPlayers; preparedPlayers = stemPlayers
-                prepared = stem; assetRole = .importedGuitarStem; player = destination.transport
+                prepared = stem; assetRole = .importedGuitarStem; player = destination.transport; source = channel
             }
             // Park every prepared transport, including inactive asset graphs. Never resume playback.
             for (channel, cached) in preparedPlayers {
@@ -2042,7 +2044,8 @@ final class Workspace: ObservableObject {
         return candidate
     }
 
-    private func activate(_ staged: StagedWorkspace, player stagedPlayer: (any AudioPlayerTransport)?, session: WorkspaceSession) {
+    private func activate(_ staged: StagedWorkspace, player stagedPlayer: (any AudioPlayerTransport)?,
+                          originalChannel: ListeningSource, session: WorkspaceSession) {
         stopAndCleanAudio()
         let previousDemo = demoURL
         if let previousDemo, previousDemo != staged.audio?.original {
@@ -2067,7 +2070,7 @@ final class Workspace: ObservableObject {
         undoHistory.removeAll(); redoHistory.removeAll(); fretEntry.reset(); newlyCreatedID = nil
         inspectorVisible = false; scorePage = session.scorePage; followScore = session.followScore
         loopStart = session.loopStart; loopEnd = session.loopEnd
-        looping = session.looping; source = ListeningSource(rawValue: session.channel) ?? .stereo
+        looping = session.looping; source = originalChannel
         player = stagedPlayer
         if let stagedPlayer { preparedPlayers[source] = PreparedPlayer(transport: stagedPlayer, volume: stagedPlayer.volume) }
         projectRevision &+= 1

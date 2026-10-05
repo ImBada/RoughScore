@@ -565,6 +565,34 @@ extension WorkspaceSessionTests {
 
 
 extension WorkspaceSessionTests {
+    @Test(arguments: [ListeningSource.left, .right])
+    func restoredStemLeavesInactiveOriginalKeyedToItsActualChannel(channel: ListeningSource) async throws {
+        let f = try SessionFixture(); defer { f.clean() }
+        let original = f.url("original.caf"), stem = f.url("stem.caf")
+        try StreamingCacheFixture.write(original, seconds: 12, channels: 2)
+        try StreamingCacheFixture.write(stem, seconds: 12, channels: 2)
+        let services = try f.services(native: true), w = Workspace(services: services)
+        #expect(await w.loadAudio(at: original)?.value == true)
+        #expect(await w.attachStem(at: stem)?.value == true)
+        let url = f.url("asset-channel.roughscore")
+        #expect(w.saveAs(to: url))
+        #expect(w.switchAsset(.importedGuitarStem)); w.switchSource(channel); w.seek(8)
+        let exact = w.project
+        w.shutdown()
+        let reopened = Workspace(services: services); defer { reopened.shutdown() }
+        #expect(await reopened.loadProject(at: url)?.value == true)
+        #expect(reopened.assetRole == .importedGuitarStem && reopened.source == channel && !reopened.playing)
+        // Switching to the inactive Original must prepare the requested real channel, rather than
+        // retrieving the retained Stereo transport from a Left/Right cache key.
+        #expect(reopened.switchAsset(.original))
+        let generation = try #require(reopened.prepared?.generation)
+        let selected = try #require(f.capture.players[generation]?[channel])
+        #expect(selected.source == channel && reopened.source == channel)
+        #expect(abs(selected.currentTime - 8) < 0.001 && !selected.isPlaying)
+        #expect(selected.graph.nativeGains[channel] == 1 && selected.graph.nativeGains[.stereo] == 0)
+        #expect(reopened.project == exact && !reopened.dirty && !reopened.canUndo)
+    }
+
     @Test func failedRestoredChannelParksStereoAndUsesItsActualSummaryLayout() async throws {
         let f = try SessionFixture(); defer { f.clean() }
         let source = f.url("generated-channel.caf")
