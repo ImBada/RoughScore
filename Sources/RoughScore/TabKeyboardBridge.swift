@@ -4,22 +4,41 @@ import RoughScoreCore
 
 /// TAB selection owns keyboard focus; ordinary text fields keep their native typing behavior.
 struct TabKeyboardBridge: NSViewRepresentable {
-    let workspace: Workspace
-    func makeNSView(context: Context) -> TabKeyboardView {
-        let view = TabKeyboardView()
-        view.workspace = workspace
-        workspace.requestKeyboardFocus = { [weak view] in
-            guard let view else { return }
+    @ObservedObject var workspace: Workspace
+    func makeNSView(context: Context) -> TabKeyboardView { TabKeyboardView() }
+    func updateNSView(_ view: TabKeyboardView, context: Context) {
+        view.workspace = workspace; view.editorID = workspace.editorIdentity
+        workspace.keyboardFocusOwner = view.owner
+        let identity = workspace.editorIdentity
+        workspace.requestKeyboardFocus = { [weak view, weak workspace] in
+            guard let view, let workspace, workspace.editorIdentity == identity,
+                  workspace.keyboardFocusOwner == view.owner, workspace.canEdit else { return }
+            if view.window?.isVisible == true { view.window?.makeKey() }
             view.window?.makeFirstResponder(view)
         }
-        return view
     }
-    func updateNSView(_ nsView: TabKeyboardView, context: Context) { nsView.workspace = workspace }
+    static func dismantleNSView(_ view: TabKeyboardView, coordinator: ()) {
+        if let workspace = view.workspace, workspace.keyboardFocusOwner == view.owner {
+            workspace.requestKeyboardFocus = nil; workspace.keyboardFocusOwner = nil
+            workspace.tabInputFocused = false
+        }
+        view.workspace = nil
+    }
 }
 
 @MainActor
 final class TabKeyboardView: NSView {
     weak var workspace: Workspace?
+    let owner = UUID()
+    var editorID: UUID?
+    override func becomeFirstResponder() -> Bool {
+        guard super.becomeFirstResponder() else { return false }
+        workspace?.tabInputFocused = true; return true
+    }
+    override func resignFirstResponder() -> Bool {
+        guard super.resignFirstResponder() else { return false }
+        workspace?.tabInputFocused = false; return true
+    }
     // Tests use a unique named pasteboard; production uses the normal clipboard.
     var pasteboard = NSPasteboard.general
     @objc func copy(_ sender: Any?) { _ = workspace?.copySelection(to: pasteboard) }
@@ -36,7 +55,16 @@ final class TabKeyboardView: NSView {
         super.flagsChanged(with: event)
     }
     override func keyDown(with event: NSEvent) {
-        guard let workspace else { super.keyDown(with: event); return }
+        guard let workspace, editorID == nil || editorID == workspace.editorIdentity else { super.keyDown(with: event); return }
+        // Explicit control navigation is bridge-local; VoiceOver and Command chords pass through.
+        if event.keyCode == 48, event.modifierFlags.contains(.control),
+           !event.modifierFlags.contains(.option), !event.modifierFlags.contains(.command) {
+            _ = workspace.requestControlFocus?(event.modifierFlags.contains(.shift)); return
+        }
+        if event.modifierFlags.contains(.command), event.keyCode == 36,
+           !event.modifierFlags.contains(.control), !event.modifierFlags.contains(.option) {
+            workspace.requestKeyboardFocus?(); return
+        }
         if event.modifierFlags.contains(.command), !event.modifierFlags.contains(.control),
            !event.modifierFlags.contains(.option) {
             switch event.charactersIgnoringModifiers?.lowercased() {
@@ -51,7 +79,7 @@ final class TabKeyboardView: NSView {
             }
             return
         }
-        guard !event.modifierFlags.contains(.control) else {
+        guard !event.modifierFlags.contains(.control), !event.modifierFlags.contains(.command) else {
             super.keyDown(with: event); return
         }
         guard workspace.canEdit else {

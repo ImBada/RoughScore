@@ -23,6 +23,8 @@ struct TuningEditor: View {
     @State private var pitches = Array(repeating: "", count: 6)
     @State private var capo = "0"
     @State private var message = ""
+    @State private var keyLoop = NativeEditorKeyLoop(order: (1...6).map { "tuning-open-\($0)" } +
+        ["tuning-capo", "tuning-standard", "tuning-drop-d", "tuning-cancel", "tuning-apply"])
     private var validatedDraft: TuningDefinition? {
         let values = pitches.compactMap { Int($0.trimmingCharacters(in: .whitespacesAndNewlines)) }
         guard values.count == 6, let capoValue = Int(capo.trimmingCharacters(in: .whitespacesAndNewlines)) else { return nil }
@@ -35,24 +37,24 @@ struct TuningEditor: View {
             Text("L/R 공통 · MIDI 0–127 · 프렛은 카포 기준 0–24\n적용해도 기존 시간/줄/프렛은 유지됩니다.")
                 .font(.system(size: 11)).foregroundStyle(.secondary)
             HStack {
-                BulkActionButton(title: "Standard", identifier: "tuning-standard", enabled: workspace.canMutateNotes) { preset(.standard) }
-                BulkActionButton(title: "Drop D", identifier: "tuning-drop-d", enabled: workspace.canMutateNotes) { preset(.dropD) }
+                EditorActionButton(title: "Standard", identifier: "tuning-standard", enabled: workspace.canMutateNotes, keyLoop: keyLoop) { preset(.standard) }
+                EditorActionButton(title: "Drop D", identifier: "tuning-drop-d", enabled: workspace.canMutateNotes, keyLoop: keyLoop) { preset(.dropD) }
                 Text("또는 직접 MIDI 입력").font(.system(size: 10)).foregroundStyle(.secondary)
             }
             ForEach(0..<6, id: \.self) { index in
                 HStack {
                     Text("\(index + 1)번 줄").frame(width: 55, alignment: .leading)
-                    TextField("open MIDI", text: $pitches[index])
-                        .accessibilityIdentifier("tuning-open-\(index + 1)")
-                        .frame(width: 70).textFieldStyle(.roundedBorder)
+                    EditorDraftField(text: $pitches[index], placeholder: "open MIDI", label: "\(index + 1)번 줄 open MIDI",
+                        identifier: "tuning-open-\(index + 1)", keyLoop: keyLoop, initiallyFocused: index == 0)
+                        .frame(width: 70, height: 24)
                     Text(Int(pitches[index]).map(TuningDefinition.pitchName) ?? "옥타브 미확정")
                         .foregroundStyle(.secondary)
                 }
             }
             HStack {
                 Text("카포").frame(width: 55, alignment: .leading)
-                TextField("0–24", text: $capo).accessibilityIdentifier("tuning-capo")
-                    .frame(width: 70).textFieldStyle(.roundedBorder)
+                EditorDraftField(text: $capo, placeholder: "0–24", label: "카포 · 0–24", identifier: "tuning-capo", keyLoop: keyLoop)
+                    .frame(width: 70, height: 24)
             }
             if workspace.project.resolvedTuning == nil {
                 Text("이전 튜닝의 옥타브는 알 수 없습니다. 프리셋 또는 여섯 MIDI를 명시해 주세요.")
@@ -62,10 +64,10 @@ struct TuningEditor: View {
                 Text(invalidDraftMessage).font(.system(size: 11)).foregroundStyle(.secondary)
             } else if !message.isEmpty { Text(message).font(.system(size: 11)).foregroundStyle(.red) }
             HStack {
-                Button("취소") { dismiss() }
+                EditorActionButton(title: "취소", identifier: "tuning-cancel", enabled: true, keyLoop: keyLoop) { dismiss() }
                 Spacer()
-                BulkActionButton(title: "적용 · 기존 운지 유지", identifier: "tuning-apply",
-                    enabled: workspace.canMutateNotes && validatedDraft != nil) { apply() }
+                EditorActionButton(title: "적용 · 기존 운지 유지", identifier: "tuning-apply",
+                    enabled: workspace.canMutateNotes && validatedDraft != nil, keyLoop: keyLoop) { apply() }
                     .disabled(!workspace.canMutateNotes || validatedDraft == nil)
             }
         }.font(.system(size: 12)).padding(18).frame(width: 380)

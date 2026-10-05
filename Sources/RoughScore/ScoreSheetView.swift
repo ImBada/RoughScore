@@ -16,6 +16,7 @@ private func scoreTime(_ time: Double) -> String {
 struct ScoreSheetView: View {
     @ObservedObject var workspace: Workspace
     @State private var fitPage = false
+    @State private var displayOwner = UUID()
     @State private var paperHeight = 740.0
 
     var body: some View {
@@ -71,6 +72,20 @@ struct ScoreSheetView: View {
                 }
             }
         }
+        .onAppear {
+            let owner = displayOwner, identity = workspace.editorIdentity, fit = $fitPage
+            workspace.scoreDisplayOwner = owner
+            workspace.requestScoreFitPageToggle = { [weak workspace = workspace] in
+                guard let workspace, workspace.canEdit, workspace.editorIdentity == identity,
+                      workspace.scoreDisplayOwner == owner else { return }
+                fit.wrappedValue.toggle()
+            }
+        }
+        .onDisappear {
+            if workspace.scoreDisplayOwner == displayOwner {
+                workspace.requestScoreFitPageToggle = nil; workspace.scoreDisplayOwner = nil
+            }
+        }
         .onChange(of: ProjectViewSetting(projectID: workspace.editorIdentity, value: workspace.measuresPerSystem)) { previous, current in
             guard previous.projectID == current.projectID else { return }
             workspace.reflowScore(from: ScoreLayout(duration: workspace.project.duration, bars: workspace.scoreSummary?.bars ?? [],
@@ -111,12 +126,12 @@ struct ScoreSheetView: View {
                     if previous.projectID == current.projectID && current.value { workspace.followScoreCursor() }
                 }
             Button { workspace.browseScorePage(page - 1) } label: { Image(systemName: "chevron.left") }
-                .disabled(page == 0).help("이전 악보 페이지")
+                .disabled(page == 0).accessibilityLabel("이전 악보 페이지").help("이전 악보 페이지")
             Picker("페이지", selection: Binding(get: { workspace.displayedScorePage }, set: { workspace.browseScorePage($0) })) {
                 ForEach(0..<layout.pageCount, id: \.self) { Text("\($0 + 1) / \(layout.pageCount) 페이지").tag($0) }
             }.labelsHidden().frame(width: 125)
             Button { workspace.browseScorePage(page + 1) } label: { Image(systemName: "chevron.right") }
-                .disabled(page == layout.pageCount - 1).help("다음 악보 페이지")
+                .disabled(page == layout.pageCount - 1).accessibilityLabel("다음 악보 페이지").help("다음 악보 페이지")
             }
         }.font(.system(size: 11)).toggleStyle(.checkbox)
     }
@@ -194,7 +209,7 @@ private struct SongOverview: View {
                     let fraction = min(1, max(0, (value.location.x - 24) / (geometry.size.width - 36)))
                     workspace.jumpToScoreTime(fraction * workspace.project.duration)
                 })
-            }.frame(height: 83)
+            }.overlay(EditingCursorAXSurface(workspace: workspace, name: "곡 전체 지도")).frame(height: 83)
         }.padding(10).background(Palette.panel, in: RoundedRectangle(cornerRadius: 8))
     }
 }

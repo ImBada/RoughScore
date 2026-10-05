@@ -29,7 +29,9 @@ struct NotePointerLayout {
         let chipWidth = (compact ? 24.0 : 30.0) / scale
         let clusterWidth = (compact ? 48.0 : 54.0) / scale
         let gap = 4.0 / scale
-        let height = compact ? 14.0 : 26.0
+        // Score strings are only 14 logical points apart (4.9pt at 0.35 fit).
+        // Do not overlap them. The shared native list provides 48pt targets at every scale.
+        let height = compact ? 14.0 : 30.0 / scale
         func target(_ notes: [TabEvent]) -> NotePointerTarget {
             let width = min(bounds.upperBound - bounds.lowerBound, notes.count == 1 ? chipWidth : clusterWidth)
             let point = position(notes[0])
@@ -59,5 +61,11 @@ struct NotePointerLayout {
         targets = result
     }
 
-    func hit(at point: CGPoint) -> NotePointerTarget? { targets.first { $0.frame.contains(point) } }
+    func hit(at point: CGPoint) -> NotePointerTarget? {
+        targets.filter { $0.frame.contains(point) }.min {
+            let a = hypot(point.x - $0.center.x, point.y - $0.center.y)
+            let b = hypot(point.x - $1.center.x, point.y - $1.center.y)
+            return a == b ? $0.id.uuidString < $1.id.uuidString : a < b
+        }
+    }
 }

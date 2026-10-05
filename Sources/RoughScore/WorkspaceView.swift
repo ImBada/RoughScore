@@ -24,10 +24,37 @@ struct ProjectViewSetting<Value: Equatable>: Equatable {
 
 struct WorkspaceView: View {
     @ObservedObject var workspace: Workspace
+    @State private var noteListOpen = false
+    @State private var tuningOpen = false
     var body: some View {
         VStack(spacing: 0) {
             topBar.disabled(!workspace.canEdit)
             Divider().overlay(Palette.border)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(workspace.tabInputFocused ? "TAB 입력 · Tab 다음 음 · ⌃Tab 컨트롤로 · ⇧⌃Tab 뒤로" : "컨트롤 탐색 · Tab 이동 · TAB 입력 버튼 또는 ⌘Return으로 입력")
+                    .font(.system(size: 11)).accessibilityIdentifier("editor-input-mode")
+                HStack(spacing: 8) {
+                    Text("편집 커서 · 초").font(.system(size: 11))
+                    EditorNavigationControls(workspace: workspace, openNotes: { noteListOpen = true }, openTuning: { tuningOpen = true })
+                        .frame(width: 696, height: 32).id(workspace.editorIdentity)
+                    Spacer(minLength: 0)
+                }
+                Text("입력 간격은 표시 설정 오른쪽 초 필드 · 작은 악보 음은 음 목록에서 48pt 행으로 선택")
+                    .font(.system(size: 10)).foregroundStyle(Palette.secondary)
+            }.padding(.horizontal, 18).padding(.vertical, 6)
+                .popover(isPresented: $noteListOpen) {
+                    VStack(alignment: .leading) {
+                        Text("음 목록 · \(workspace.lane.title) · 원곡 시간순")
+                        AccessibleNoteList(workspace: workspace, events: workspace.project.events.filter { $0.lane == workspace.lane }.sorted {
+                            if $0.time != $1.time { return $0.time < $1.time }; return $0.id.uuidString < $1.id.uuidString
+                        }, dismiss: { noteListOpen = false })
+                            .frame(width: 660, height: 320)
+                        Button("닫기") { noteListOpen = false; _ = workspace.requestControlFocus?(false) }
+                    }.padding(12)
+                }
+                .popover(isPresented: $tuningOpen) {
+                    TuningEditor(workspace: workspace) { tuningOpen = false; _ = workspace.requestControlFocus?(false) }
+                }
             if workspace.busy {
                 HStack {
                     ProgressView(value: workspace.loadProgress).frame(maxWidth: 280)
@@ -90,8 +117,10 @@ struct WorkspaceView: View {
             .font(.system(size: 10)).foregroundStyle(Palette.secondary)
             .padding(.horizontal, 18).frame(height: 30).background(Palette.panel)
         }
+        .onChange(of: workspace.editorIdentity) { _, _ in noteListOpen = false; tuningOpen = false }
+        .onChange(of: workspace.tabInputFocused) { _, focused in if focused { noteListOpen = false; tuningOpen = false } }
         .background(Palette.background).tint(Palette.mint)
-        .background(TabKeyboardBridge(workspace: workspace).allowsHitTesting(false))
+        .background(TabKeyboardBridge(workspace: workspace).id(workspace.editorIdentity).allowsHitTesting(false))
         .sheet(item: Binding(get: { workspace.exportSnapshot }, set: { if $0 == nil { workspace.cancelExport() } })) { snapshot in
             ScoreExportOptionsView(snapshot: snapshot, format: snapshot.initialFormat,
                 submit: { options in Task { _ = await workspace.completeExport(snapshot, options: options) } }, cancel: { workspace.cancelExport() })
@@ -148,7 +177,7 @@ struct WorkspaceView: View {
                             Spacer()
                             if workspace.lane == lane { Circle().fill(Palette.mint).frame(width: 5, height: 5) }
                         }.padding(10).background(workspace.lane == lane ? Palette.elevated : .clear, in: RoundedRectangle(cornerRadius: 8))
-                    }.buttonStyle(.plain)
+                    }.buttonStyle(.plain).accessibilityValue(workspace.lane == lane ? "선택됨" : "선택 안 됨")
                 }
                 Text("L/R은 선택한 파일의 채널입니다.\n기타 파트 분리를 뜻하지 않습니다.")
                     .font(.system(size: 10)).foregroundStyle(Palette.secondary).lineSpacing(3).fixedSize(horizontal: false, vertical: true)
@@ -217,7 +246,7 @@ struct WorkspaceView: View {
                     Image(systemName: workspace.playing ? "pause.fill" : "play.fill")
                         .font(.system(size: 16)).foregroundStyle(Palette.background).frame(width: 40, height: 40)
                         .background(Palette.mint, in: RoundedRectangle(cornerRadius: 10))
-                }.buttonStyle(.plain).disabled(workspace.prepared == nil || workspace.busy)
+                }.accessibilityLabel(workspace.playing ? "일시 정지" : "재생").buttonStyle(.plain).disabled(workspace.prepared == nil || workspace.busy)
                 Text(clockLabel(workspace.cursor)).font(.system(size: 17, weight: .medium, design: .monospaced))
                 Text("/ \(clockLabel(workspace.project.duration))").font(.system(size: 11, design: .monospaced)).foregroundStyle(Palette.secondary)
                 Spacer(minLength: 0)
@@ -229,12 +258,12 @@ struct WorkspaceView: View {
                 Picker("재생 속도", selection: $workspace.rate) {
                     Text("0.5×").tag(Float(0.5)); Text("0.75×").tag(Float(0.75)); Text("1×").tag(Float(1))
                 }.labelsHidden().frame(width: 70)
-                Toggle(isOn: $workspace.looping) { Image(systemName: "repeat") }.toggleStyle(.button).help("A–B 반복")
+                Toggle(isOn: $workspace.looping) { Image(systemName: "repeat") }.toggleStyle(.button).accessibilityLabel("A–B 반복").accessibilityValue(workspace.looping ? "켜짐" : "꺼짐").help("A–B 반복")
                 Button("A \(clockLabel(workspace.loopStart))") { workspace.setLoopStart() }.help("현재 위치를 반복 시작점으로")
                 Button("B \(clockLabel(workspace.loopEnd))") { workspace.setLoopEnd() }.help("현재 위치를 반복 끝점으로")
             }.font(.system(size: 10, design: .monospaced))
             if !workspace.scoreView {
-                Slider(value: Binding(get: { workspace.cursor }, set: { workspace.seek($0) }), in: 0...workspace.project.duration)
+                Slider(value: Binding(get: { workspace.cursor }, set: { workspace.seekForEditing($0, requestFocus: false) }), in: 0...workspace.project.duration).accessibilityLabel("편집 커서 · 원곡 초")
             }
         }.padding(workspace.scoreView ? 10 : 16).background(Palette.panel, in: RoundedRectangle(cornerRadius: 12))
     }
@@ -255,15 +284,15 @@ struct WorkspaceView: View {
             }
             Spacer(minLength: 0)
             Button { workspace.focusSelectedForPosition() } label: { Image(systemName: "plus.magnifyingglass") }
-                .disabled(workspace.selected == nil).help("선택한 음 주변 2초 확대 · 더블 클릭")
+                .disabled(workspace.selected == nil).accessibilityLabel("선택한 음 주변 2초 확대").help("선택한 음 주변 2초 확대 · 더블 클릭")
             Button { workspace.auditionSelected() } label: { Image(systemName: "speaker.wave.1") }
-                .disabled(workspace.selected == nil).help("선택한 위치부터 듣기 · Shift+Space")
+                .disabled(workspace.selected == nil).accessibilityLabel("선택한 위치부터 듣기").help("선택한 위치부터 듣기 · Shift+Space")
             Toggle("새 음 박 스냅", isOn: $workspace.snapToBeat).toggleStyle(.checkbox)
                 .help("새 음 입력에 적용 · 이동은 자유 드래그, Shift로 가까운 음에 정렬")
                 .disabled(workspace.scoreSummary?.beats.isEmpty ?? true)
-            Button { workspace.performUndo() } label: { Image(systemName: "arrow.uturn.backward") }.disabled(!workspace.canPerformUndo).help("실행 취소 · ⌘Z")
-            Button { workspace.performRedo() } label: { Image(systemName: "arrow.uturn.forward") }.disabled(!workspace.canPerformRedo).help("다시 실행 · ⇧⌘Z")
-            Button { workspace.deleteSelected() } label: { Image(systemName: "trash") }.disabled(workspace.selected == nil).help("선택한 음 삭제 · Delete")
+            Button { workspace.performUndo() } label: { Image(systemName: "arrow.uturn.backward") }.disabled(!workspace.canPerformUndo).accessibilityLabel("실행 취소").help("실행 취소 · ⌘Z")
+            Button { workspace.performRedo() } label: { Image(systemName: "arrow.uturn.forward") }.disabled(!workspace.canPerformRedo).accessibilityLabel("다시 실행").help("다시 실행 · ⇧⌘Z")
+            Button { workspace.deleteSelected() } label: { Image(systemName: "trash") }.disabled(workspace.selected == nil).accessibilityLabel("선택한 음 삭제").help("선택한 음 삭제 · Delete")
             Toggle("상세", isOn: $workspace.inspectorVisible).toggleStyle(.button).help("상세 편집 · I")
             Button("다음 +\(Int(workspace.entryInterval * 1000))ms ↵") { workspace.advanceEntry() }
                 .disabled(!workspace.canMutateNotes).help("선택을 마치고 지정한 간격만큼 커서를 이동 · Enter")
@@ -410,7 +439,7 @@ struct WaveformView: View {
                 else { workspace.seekForEditing(time(at: value.location.x, width: geometry.size.width)) }
                 dragRange = nil
             })
-        }.frame(height: 115).padding(10).background(Palette.panel, in: RoundedRectangle(cornerRadius: 12))
+        }.overlay(EditingCursorAXSurface(workspace: workspace, name: "파형")).frame(height: 115).padding(10).background(Palette.panel, in: RoundedRectangle(cornerRadius: 12))
     }
     private func time(at x: Double, width: Double) -> Double {
         let fraction = min(1, max(0, (x - 38) / (width - 58)))

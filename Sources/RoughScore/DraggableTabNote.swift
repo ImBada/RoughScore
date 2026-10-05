@@ -16,6 +16,7 @@ struct DraggableTabNote: View {
     let background: Color
     let ink: Color
     let tentative: Color
+    var hitGroup: UUID? = nil
     @State private var choosing = false
 
     var body: some View {
@@ -42,10 +43,13 @@ struct DraggableTabNote: View {
             }
         }
         .overlay(NotePointerSurface(chooserWidth: countWidth,
-            label: "\(String(shown.time))초 · \(shown.lane.title) · \(shown.string)번 줄 · \(shown.fret.map(String.init) ?? "?") · \(target.events.count)개 음 · \(selectedCount)개 선택",
+            label: NoteAccessibility.label(event, workspace: workspace) + " · \(target.events.count)개 음 · \(selectedCount)개 선택",
             selected: workspace.selectedIDs.contains(event.id),
+            identifier: "note-" + event.id.uuidString, detail: event.memo, hitGroup: hitGroup,
             actions: NotePointerControl.Actions(
                 click: { workspace.select(target.next(selectedID: workspace.selectedID)) },
+                available: NoteAccessibility.availability(event.id, workspace: workspace),
+                custom: NoteAccessibility.actions(event.id, workspace: workspace),
                 toggle: { workspace.toggleSelection(target.events.first { !workspace.selectedIDs.contains($0.id) } ?? event) },
                 chooser: { choosing = true },
                 doubleClick: { workspace.select(event); workspace.focusSelectedForPosition() },
@@ -77,6 +81,7 @@ struct DraggableTabNote: View {
 }
 
 struct NoteCollisionChooser: View {
+    @State private var navigationGroup = UUID()
     @ObservedObject var workspace: Workspace
     let events: [TabEvent]
     let dismiss: () -> Void
@@ -97,12 +102,15 @@ struct NoteCollisionChooser: View {
                                 }
                                 Spacer(minLength: 0)
                                 if workspace.selectedIDs.contains(event.id) { Image(systemName: workspace.selectedID == event.id ? "checkmark.circle.fill" : "checkmark") }
-                        }.font(.system(size: 11, design: .monospaced)).padding(6)
+                        }.font(.system(size: 11, design: .monospaced)).padding(6).frame(minHeight: 36)
                         .overlay(NotePointerSurface(chooserWidth: 0,
-                            label: "음 \(index + 1) · \(String(event.time))초 · \(event.memo)",
+                            label: "음 \(index + 1) · " + NoteAccessibility.label(event, workspace: workspace),
                             selected: workspace.selectedIDs.contains(event.id),
+                            identifier: "note-" + event.id.uuidString, detail: event.memo, navigationGroup: navigationGroup,
                             actions: NotePointerControl.Actions(
                                 click: { workspace.select(event); dismiss() },
+                                available: NoteAccessibility.availability(event.id, workspace: workspace),
+                                custom: NoteAccessibility.actions(event.id, workspace: workspace),
                                 toggle: { workspace.toggleSelection(event) }, chooser: {},
                                 doubleClick: { workspace.select(event); dismiss() },
                                 begin: {}, update: { _, _, _ in }, end: {})))
@@ -115,6 +123,7 @@ struct NoteCollisionChooser: View {
 
 /// Both actual view paths share the same grouping, target surface and drag callbacks.
 struct PointerTabNotes: View {
+    @State private var hitGroup = UUID()
     @ObservedObject var workspace: Workspace
     let events: [TabEvent]
     let bounds: ClosedRange<Double>
@@ -154,7 +163,7 @@ struct PointerTabNotes: View {
             ForEach(layout.targets) { target in
                 DraggableTabNote(workspace: workspace, event: target.representative(selectedID: workspace.selectedID),
                     target: target, position: position, destination: destination, magnetTargets: events,
-                    displayScale: displayScale, compact: compact, background: background, ink: ink, tentative: tentative)
+                    displayScale: displayScale, compact: compact, background: background, ink: ink, tentative: tentative, hitGroup: hitGroup)
             }
         }
     }

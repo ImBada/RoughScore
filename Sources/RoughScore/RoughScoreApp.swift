@@ -34,6 +34,8 @@ struct RoughScoreApp: App {
                 Button("다시 실행") { workspace.performRedo() }.keyboardShortcut("z", modifiers: [.command, .shift]).disabled(!workspace.canPerformRedo)
             }
             CommandGroup(after: .pasteboard) {
+                Button("TAB 입력으로 돌아가기") { workspace.requestKeyboardFocus?() }
+                    .keyboardShortcut(.return, modifiers: .command).disabled(!workspace.canEdit)
                 Button("선택을 커서에 복제") { _ = workspace.duplicateSelection() }
                     .keyboardShortcut("d").disabled(!workspace.canUseTabClipboard || !workspace.canEditSelection)
             }
