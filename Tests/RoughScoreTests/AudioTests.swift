@@ -62,7 +62,9 @@ struct AudioTests {
 
     /// Headless transport/decoded-frame evidence, not an acoustic gap-free or GUI claim.
     @Test @MainActor func realWorkspaceSwitchesUseLiveOriginalSecondsAtAllRates() async throws {
-        let url = try impulseFixture()
+        // This is the healthy, in-flight switch contract, not an EOF cursor test.
+        // Other hosted native suites may hold MainActor longer than a four-second clip.
+        let url = try impulseFixture(duration: 120)
         defer { try? FileManager.default.removeItem(at: url) }
         let capture = RealPlayerCapture()
         var services = WorkspaceServices.isolatedCache()
@@ -111,6 +113,7 @@ struct AudioTests {
                     try await Task.sleep(for: .milliseconds(20))
                 }
                 let liveBefore = old.currentTime
+                #expect(liveBefore < workspace.project.duration)
                 #expect(liveBefore - published >= 0.03)
                 #expect(old.rate == rate && old.isPlaying)
                 let cutover = ActiveClockPair()
@@ -215,10 +218,10 @@ struct AudioTests {
         print("Real Workspace transport: 18 switches at 0.5/0.75/1x, maximum cursor rewind=\(maximumRewind)s, backend seek rewind=\(maximumPlayerSeekRewind)s, shared-start seek readback error=\(maximumSeekReadbackError)s, active cutover difference=\(maximumCutoverDifference)s, corrective seeks=\(correctiveSeeks), healthy gain-only switches=\(healthyGainSwitches), 3 cached source ports / one native rate renderer, asymmetric decoded frames aligned")
     }
 
-    private func impulseFixture() throws -> URL {
+    private func impulseFixture(duration: Int = 4) throws -> URL {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("RoughScore-impulses-" + UUID().uuidString + ".caf")
         let format = AVAudioFormat(standardFormatWithSampleRate: 44100, channels: 2)!
-        let frames = 176400
+        let frames = 44100 * duration
         let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(frames))!
         buffer.frameLength = AVAudioFrameCount(frames)
         for channel in 0..<2 { buffer.floatChannelData![channel].initialize(repeating: 0, count: frames) }

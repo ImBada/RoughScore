@@ -444,10 +444,14 @@ final class Workspace: ObservableObject {
                   saveOperation == nil, !services.nativeModalActive() else { return .rejected(retry) }
         }
         guard ownsRequest(), !closed else { return .rejected(retry) }
+        let authorized = externalAuthorization
         // Only the automatic startup operation may be superseded. No fallback is restarted.
         if automaticStartupOperationID != nil { cancelLoading() }
         startLifecycle()
-        guard let operation = reserveLoad(requestFocus: false), let task = launchLoad(.project(url), operation: operation) else {
+        guard let operation = reserveLoad(requestFocus: false, authorizesReservation: {
+            !self.services.nativeModalActive() && ownsRequest() && !self.closed &&
+                self.externalAuthorization == authorized
+        }), let task = launchLoad(.project(url), operation: operation) else {
             return .rejected(retry)
         }
         externalProjectOperationID = operation.id
@@ -1833,12 +1837,17 @@ final class Workspace: ObservableObject {
         return launchLoad(.demo(long), operation: operation)
     }
 
-    private func reserveLoad(requestFocus: Bool = true) -> LoadOperation? {
+    private func reserveLoad(requestFocus: Bool = true, authorizesReservation: () -> Bool = { true }) -> LoadOperation? {
         guard !closed, !analyzing, saveOperation == nil, loadOperation == nil, !busy || startupPending else { return nil }
         cancelPositionDrag(requestFocus: requestFocus); endMemoEditing()
         clearPitchDetection()
         flushSession()
-        let operation = LoadOperation(projectID: projectIdentity, snapshot: project, session: currentSession)
+        let session = currentSession
+        // Session persistence and focus callbacks may reenter while no load owns the slot.
+        // Fence the exact native authorization before capturing a newer model or marking busy.
+        guard authorizesReservation(), !closed, !analyzing, saveOperation == nil, loadOperation == nil,
+              !busy || startupPending else { return nil }
+        let operation = LoadOperation(projectID: projectIdentity, snapshot: project, session: session)
         startupPending = false
         loadOperation = operation
         autosaveTask?.cancel()
