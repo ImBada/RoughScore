@@ -23,13 +23,13 @@ final class Workspace: ObservableObject {
         }
     }
     @Published private(set) var audioConnection = "오디오 준비 전"
-    @Published private(set) var assetRole: AudioAsset.Role = .original
+    @Published private(set) var assetRole: AudioAsset.Role = .original { didSet { sessionChanged() } }
     @Published private(set) var stemConnection = "스템 없음"
     private var originalAudio: PreparedAudio?
     private var stemAudio: PreparedAudio?
     private var inactivePlayers: [ListeningSource: PreparedPlayer] = [:]
-    @Published var source: ListeningSource = .stereo { didSet { if source != oldValue { clearPitchDetection() } } }
-    @Published var lane: GuitarLane = .left { didSet { if lane != oldValue { clearPitchDetection() } } }
+    @Published var source: ListeningSource = .stereo { didSet { if source != oldValue { clearPitchDetection(); sessionChanged() } } }
+    @Published var lane: GuitarLane = .left { didSet { if lane != oldValue { clearPitchDetection(); sessionChanged() } } }
     @Published var activeString = 6
     @Published var selectedID: UUID? { didSet { if selectedID != oldValue { clearPitchDetection() } } }
     @Published private(set) var selection = try! TabSelection()
@@ -44,17 +44,17 @@ final class Workspace: ObservableObject {
     var canUseTabClipboard: Bool { canMutateNotes && services.nativeTextUndo() == nil }
     private var dragSelection: TabSelection?
     private var dragEvents: [TabEvent]?
-    @Published var cursor = 2.0 { didSet { if cursor != oldValue { clearPitchDetection() } } }
+    @Published var cursor = 2.0 { didSet { if cursor != oldValue { clearPitchDetection(); sessionChanged() } } }
     @Published private(set) var entryInterval = 0.05
-    @Published var windowStart = 0.0
-    @Published var windowLength = 12.0
-    @Published var loopStart = 2.0
-    @Published var loopEnd = 6.0
-    @Published var looping = false
+    @Published var windowStart = 0.0 { didSet { sessionChanged() } }
+    @Published var windowLength = 12.0 { didSet { sessionChanged() } }
+    @Published var loopStart = 2.0 { didSet { sessionChanged() } }
+    @Published var loopEnd = 6.0 { didSet { sessionChanged() } }
+    @Published var looping = false { didSet { sessionChanged() } }
     @Published var playing = false
-    @Published var rate: Float = 1 { didSet { if rate != oldValue { updatePlaybackRate() } } }
-    @Published var showLengths = false
-    @Published var snapToBeat = false
+    @Published var rate: Float = 1 { didSet { if rate != oldValue { updatePlaybackRate(); sessionChanged() } } }
+    @Published var showLengths = false { didSet { sessionChanged() } }
+    @Published var snapToBeat = false { didSet { sessionChanged() } }
     @Published private(set) var busy = false
     @Published private(set) var loadProgress = 0.0
     @Published var analyzing = false
@@ -77,12 +77,12 @@ final class Workspace: ObservableObject {
             }
         }
     }
-    @Published var scoreView = true
-    @Published var measuresPerSystem = 4
-    @Published var scorePage = 0
-    @Published var showBothLanes = false
-    @Published var showScoreWaveforms = true
-    @Published var followScore = true
+    @Published var scoreView = true { didSet { sessionChanged() } }
+    @Published var measuresPerSystem = 4 { didSet { sessionChanged() } }
+    @Published var scorePage = 0 { didSet { sessionChanged() } }
+    @Published var showBothLanes = false { didSet { sessionChanged() } }
+    @Published var showScoreWaveforms = true { didSet { sessionChanged() } }
+    @Published var followScore = true { didSet { sessionChanged() } }
     @Published var inspectorVisible = false
     @Published private(set) var positionDrag: TabEvent?
     @Published private(set) var positionMagnetTargetID: UUID?
@@ -151,6 +151,12 @@ final class Workspace: ObservableObject {
     private var memoSession: MemoSession?
     private var nativeTextObserver: AnyCancellable?
     private var savedProject: ScoreProject?
+    @Published private(set) var sessionPersistenceError: String?
+    private var sessionTask: Task<Void, Never>?
+    private var restoringSession = false
+    private var lastPersistedSession: WorkspaceSession?
+    private var lastSessionURL: URL?
+    private var lastSessionIdentity: String?
     private var autosaveTask: Task<Void, Never>?
     private var projectURL: URL?
     private var currentPackage: PortableProjectPackage.Snapshot?
@@ -187,7 +193,8 @@ final class Workspace: ObservableObject {
     private var startupPending: Bool
     private var started = false
     private var closed = false
-    private var projectIdentity = UUID()
+    @Published private var projectIdentity = UUID()
+    var editorIdentity: UUID { projectIdentity }
     private var loadTask: Task<Bool, Never>?
     private var loadOperation: LoadOperation?
     private var analysisID: UUID?
@@ -196,6 +203,7 @@ final class Workspace: ObservableObject {
         let id = UUID()
         let projectID: UUID
         let snapshot: ScoreProject
+        let session: WorkspaceSession
     }
     private enum LoadRequest: Sendable {
         case startup, demo(Bool), audio(URL, Bool), project(URL)
@@ -213,6 +221,7 @@ final class Workspace: ObservableObject {
         var offlineReason: String?
         var stemAudio: PreparedAudio?
         var stemReason: String?
+        var session: WorkspaceSession?
     }
 
     init(services: WorkspaceServices = .live, awaitsStartup: Bool = false) {
@@ -1271,7 +1280,60 @@ final class Workspace: ObservableObject {
         dirty = savedProject.map { project != $0 } ?? true
         saveState = dirty ? (projectURL == nil ? .unsaved : .pending) : (projectURL == nil ? .unsaved : .saved)
     }
-    /// Await the currently scheduled revision; callers still inspect durable bytes and dirty state.
+    private var currentSession: WorkspaceSession {
+        var value = WorkspaceSession()
+        value.cursor = playing ? boundedPlaybackTime(livePlayerTime(player)) : cursor
+        value.lane = lane.rawValue; value.asset = assetRole.rawValue; value.assetID = activeAsset?.id; value.channel = source.rawValue
+        value.windowStart = windowStart; value.windowLength = windowLength; value.rate = rate
+        value.scoreView = scoreView; value.measuresPerSystem = measuresPerSystem; value.scorePage = scorePage
+        value.showBothLanes = showBothLanes; value.showScoreWaveforms = showScoreWaveforms; value.followScore = followScore
+        value.showLengths = showLengths; value.snapToBeat = snapToBeat
+        value.loopStart = loopStart; value.loopEnd = loopEnd; value.looping = looping
+        return value.bounded(to: project, stemAvailable: stemAudio != nil)
+    }
+
+    /// Coalesce direct SwiftUI bindings and transport ticks. Continuous playback writes at most once
+    /// per second; resetting a debounce at every tick would never persist a long-running song.
+    private func sessionChanged() {
+        guard !closed, !busy, !restoringSession, projectURL != nil, sessionTask == nil else { return }
+        let identity = projectIdentity
+        sessionTask = Task { [weak self] in
+            do { try await Task.sleep(for: .seconds(1)) } catch { return }
+            guard let self, !Task.isCancelled, !self.closed, self.projectIdentity == identity else { return }
+            self.sessionTask = nil
+            guard !self.busy else { return }
+            self.flushSession()
+        }
+    }
+
+    /// Separate from note autosave/baseline/undo. Failure is advisory even after durable publication.
+    func flushSession() {
+        sessionTask?.cancel(); sessionTask = nil
+        guard !closed, !restoringSession, let url = projectURL else { return }
+        // Associate with the durable document, even while an unsaved relink/title edit is pending.
+        let document = savedProject ?? project
+        let value = currentSession, identity = WorkspaceSessionStore.documentIdentity(document)
+        guard value != lastPersistedSession || url != lastSessionURL || identity != lastSessionIdentity else { return }
+        if persistSession(value, to: url, project: document) {
+            lastPersistedSession = value; lastSessionURL = url; lastSessionIdentity = identity
+        }
+    }
+
+    @discardableResult
+    private func persistSession(_ value: WorkspaceSession, to url: URL, project: ScoreProject) -> Bool {
+        do {
+            try services.sessionStore.write(value, url, project)
+            sessionPersistenceError = nil
+            return true
+        } catch {
+            sessionPersistenceError = "작업 위치 저장 실패 · TAB 저장 상태는 유지됩니다: " + error.localizedDescription
+            return false
+        }
+    }
+
+    func awaitSessionPersistence() async { await sessionTask?.value }
+
+    /// Await the currently scheduled note revision; callers still inspect durable bytes and dirty state.
     func awaitAutosave() async { await autosaveTask?.value }
     func awaitLoading() async { await loadTask?.value }
 
@@ -1493,7 +1555,7 @@ final class Workspace: ObservableObject {
                     if let audio { services.discardPreparedTransport(audio); audio.resource.disposeScratch() }
                 }
                 if loadOperation?.id == operation.id {
-                    loadOperation = nil; loadTask = nil; busy = false; scheduleAutosave()
+                    loadOperation = nil; loadTask = nil; busy = false; scheduleAutosave(); sessionChanged()
                 }
             }
             do {
@@ -1673,7 +1735,8 @@ final class Workspace: ObservableObject {
         guard !closed, !analyzing, saveOperation == nil, loadOperation == nil, !busy || startupPending else { return nil }
         cancelPositionDrag(); endMemoEditing()
         clearPitchDetection()
-        let operation = LoadOperation(projectID: projectIdentity, snapshot: project)
+        flushSession()
+        let operation = LoadOperation(projectID: projectIdentity, snapshot: project, session: currentSession)
         startupPending = false
         loadOperation = operation
         autosaveTask?.cancel()
@@ -1694,7 +1757,7 @@ final class Workspace: ObservableObject {
         guard loadOperation != nil else { return }
         loadTask?.cancel(); loadTask = nil; loadOperation = nil
         busy = false; loadProgress = 0
-        if !closed { status = "오디오 준비 취소됨 · 이전 작업 유지"; scheduleAutosave() }
+        if !closed { status = "오디오 준비 취소됨 · 이전 작업 유지"; scheduleAutosave(); sessionChanged() }
     }
 
     private func requireCurrent(_ operation: LoadOperation) throws {
@@ -1789,6 +1852,9 @@ final class Workspace: ObservableObject {
             }
         }
         staged.projectURL = url; staged.package = package; staged.fromDisk = true; staged.baseline = loaded
+        // A cancellation-ignoring lookup must not publish into a subsequently opened document.
+        staged.session = try? await services.sessionStore.read(url, loaded)
+        try requireCurrent(operation)
         retained = true
         return staged
     }
@@ -1839,7 +1905,7 @@ final class Workspace: ObservableObject {
             }
             if loadOperation?.id == operation.id {
                 loadTask = nil; loadOperation = nil; busy = false
-                if !closed { scheduleAutosave() }
+                if !closed { scheduleAutosave(); sessionChanged() }
             }
         }
         do {
@@ -1856,6 +1922,7 @@ final class Workspace: ObservableObject {
             case .demo(let long): staged = try await stageDemo(long, operation: operation)
             case .audio(let url, let relink):
                 staged = try await stageAudio(url, preserving: relink ? operation.snapshot : nil, operation: operation)
+                if relink { staged?.session = operation.session }
                 if relink, let asset = operation.snapshot.stemAsset {
                     do {
                         let stemDuration = staged?.project.duration ?? project.duration
@@ -1919,11 +1986,42 @@ final class Workspace: ObservableObject {
                     candidate.stemAudio = nil; candidate.stemReason = "스템 재생 준비 실패 · 다시 연결: " + error.localizedDescription
                 }
             }
+            var session = (candidate.session ?? WorkspaceSession()).bounded(to: candidate.project, stemAvailable: candidate.stemAudio != nil)
+            if candidate.isDemo { session.cursor = 2; session.loopStart = 2; session.loopEnd = min(6, candidate.project.duration) }
+            var selectedPlayer = stagedPlayer
+            if let audio = candidate.audio,
+               let channel = ListeningSource(rawValue: session.channel), channel != .stereo {
+                do {
+                    let transport = try services.makePlayer(audio, channel)
+                    transport.enableRate = true; transport.rate = session.rate
+                    guard transport.prepareToPlay() else { throw AudioIssue.playbackFailed }
+                    selectedPlayer = transport
+                } catch { session.channel = "stereo" }
+            }
+            // Channel preparation can fall back too; page bounds/follow use the channel actually parked.
+            session = session.bounded(to: candidate.project, stemAvailable: candidate.stemAudio != nil)
             try candidate.package?.validate()
             try requireCurrent(operation)
-            activate(candidate, player: stagedPlayer)
+            flushSession()
+            try requireCurrent(operation)
+            restoringSession = true
+            activate(candidate, player: selectedPlayer, session: session)
             stemAudio = candidate.stemAudio; inactivePlayers = stemPlayers
+            if session.asset == "importedGuitarStem", let stem = stemAudio,
+               let channel = ListeningSource(rawValue: session.channel), let destination = stemPlayers[channel] {
+                inactivePlayers = preparedPlayers; preparedPlayers = stemPlayers
+                prepared = stem; assetRole = .importedGuitarStem; player = destination.transport
+            }
+            // Park every prepared transport, including inactive asset graphs. Never resume playback.
+            for (channel, cached) in preparedPlayers {
+                cached.transport.pause(); cached.transport.rate = rate; cached.transport.currentTime = cursor
+                cached.transport.volume = channel == source ? cached.volume : 0
+            }
+            for cached in inactivePlayers.values {
+                cached.transport.pause(); cached.transport.rate = rate; cached.transport.currentTime = cursor; cached.transport.volume = 0
+            }
             stemConnection = candidate.stemReason ?? stemDescription(candidate.stemAudio, asset: candidate.project.stemAsset)
+            restoringSession = false
             committed = true; loadProgress = 1
             return true
         } catch {
@@ -1944,7 +2042,7 @@ final class Workspace: ObservableObject {
         return candidate
     }
 
-    private func activate(_ staged: StagedWorkspace, player stagedPlayer: (any AudioPlayerTransport)?) {
+    private func activate(_ staged: StagedWorkspace, player stagedPlayer: (any AudioPlayerTransport)?, session: WorkspaceSession) {
         stopAndCleanAudio()
         let previousDemo = demoURL
         if let previousDemo, previousDemo != staged.audio?.original {
@@ -1956,16 +2054,22 @@ final class Workspace: ObservableObject {
         audioConnection = staged.offlineReason.map { "오프라인 · " + $0 } ??
             (staged.audio?.isMono == true ? "모노 연결됨 · L/R 동일" : "스테레오 연결됨 · 원본 L/R")
         projectIdentity = UUID(); projectURL = staged.projectURL; currentPackage = staged.package; isDemo = staged.isDemo
-        resetSelection(); cursor = staged.isDemo ? 2 : 0; windowStart = 0
+        resetSelection(); activeString = 6
+        cursor = session.cursor; windowStart = session.windowStart; windowLength = session.windowLength
+        lane = GuitarLane(rawValue: session.lane) ?? .left
+        rate = session.rate; scoreView = session.scoreView; measuresPerSystem = session.measuresPerSystem
+        showBothLanes = session.showBothLanes; showScoreWaveforms = session.showScoreWaveforms
+        showLengths = session.showLengths; snapToBeat = session.snapToBeat
+        lastPersistedSession = nil; lastSessionURL = nil; sessionPersistenceError = nil
         positionDrag = nil; positionMagnetTargetID = nil; magnetDragInput = nil
         dragSelection = nil; dragEvents = nil
         memoSession = nil
         undoHistory.removeAll(); redoHistory.removeAll(); fretEntry.reset(); newlyCreatedID = nil
-        inspectorVisible = false; scorePage = 0; followScore = true
-        loopStart = staged.isDemo ? 2 : 0; loopEnd = staged.isDemo ? 6 : min(project.duration, 4)
-        looping = false; source = .stereo
+        inspectorVisible = false; scorePage = session.scorePage; followScore = session.followScore
+        loopStart = session.loopStart; loopEnd = session.loopEnd
+        looping = session.looping; source = ListeningSource(rawValue: session.channel) ?? .stereo
         player = stagedPlayer
-        if let stagedPlayer { preparedPlayers[.stereo] = PreparedPlayer(transport: stagedPlayer, volume: stagedPlayer.volume) }
+        if let stagedPlayer { preparedPlayers[source] = PreparedPlayer(transport: stagedPlayer, volume: stagedPlayer.volume) }
         projectRevision &+= 1
         savedProject = staged.baseline
         refreshSaveState()
@@ -2083,14 +2187,17 @@ final class Workspace: ObservableObject {
             // Injected synchronous writers may reenter. They cannot advance the old session.
             try requireSave()
             if copy {
+                persistSession(currentSession, to: destination, project: saved)
                 status = "프로젝트 사본 저장 완료 · 현재 저장 위치 유지"
                 return true
             }
+            flushSession()
             project = saved; savedProject = saved; projectURL = destination; currentPackage = package
             rebasePreparedSources(to: saved, package: package)
             refreshSaveState()
             services.rememberProject(destination)
             status = "프로젝트 저장 완료 · 이후 입력은 자동 저장"
+            flushSession()
             return true
         } catch {
             if let copiedAudio { try? FileManager.default.removeItem(at: copiedAudio) }
@@ -2201,6 +2308,7 @@ final class Workspace: ObservableObject {
     }
     func shutdown() {
         guard !closed else { return }
+        flushSession()
         closed = true; startupPending = false
         clearPitchDetection()
         nativeTextObserver?.cancel(); nativeTextObserver = nil; memoSession = nil
