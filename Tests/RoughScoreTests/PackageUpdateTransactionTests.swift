@@ -40,6 +40,29 @@ struct PackageUpdateTransactionTests {
         }
     }
 
+    @Test func collectionCannotContaminateItsSourcePackageThroughAnAlias() throws {
+        let (root, initial) = try fixture(); defer { try? FileManager.default.removeItem(at: root) }
+        let alias = root.appendingPathComponent("alias.roughscorepkg")
+        let mediaAlias = root.appendingPathComponent("media-alias")
+        try FileManager.default.createSymbolicLink(at: alias, withDestinationURL: initial.root)
+        try FileManager.default.createSymbolicLink(at: mediaAlias, withDestinationURL: initial.root.appendingPathComponent("Media"))
+        let json = try Data(contentsOf: initial.root.appendingPathComponent("project.json"))
+        var staged = false
+        for base in [initial.root, initial.root.appendingPathComponent("Media"), alias, mediaAlias] {
+            let destination = base.appendingPathComponent("nested.roughscorepkg")
+            #expect(throws: PortableProjectPackage.PackageError.invalidDestination) {
+                _ = try PortableProjectPackage.collect(initial.project, to: destination, sourceRoot: initial.root,
+                    hooks: .init(checkpoint: { _ in staged = true }))
+            }
+            #expect(!staged && !FileManager.default.fileExists(atPath: destination.path))
+            try initial.validate()
+            #expect(try Data(contentsOf: initial.root.appendingPathComponent("project.json")) == json)
+        }
+        #expect(throws: PortableProjectPackage.PackageError.invalidDestination) {
+            _ = try PortableProjectPackage.collect(initial.project, to: alias, sourceRoot: initial.root)
+        }
+    }
+
     @Test func metadataFailuresAndCancellationLeaveTheDurablePackageIntact() throws {
         let (root, initial) = try fixture(); defer { try? FileManager.default.removeItem(at: root) }
         let json = initial.root.appendingPathComponent("project.json")

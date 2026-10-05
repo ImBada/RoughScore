@@ -73,6 +73,33 @@ public enum PortableProjectPackage {
                     verifyingExpectedIdentities: verifyingExpectedIdentities)
     }
 
+    /// A package is a closed resource set: publishing another document inside it invalidates it.
+    /// Check canonical components and existing ancestor identities, including symlink/case aliases,
+    /// before any staging. Normal replacement of the active package uses `update` instead.
+    public static func validateDestination(_ destination: URL, outside packageRoot: URL) throws {
+        guard destination.isFileURL, packageRoot.isFileURL else { throw PackageError.invalidDestination }
+        let rootURL = packageRoot.resolvingSymlinksInPath().standardizedFileURL
+        let root = try Directory(rootURL)
+        let components = destination.resolvingSymlinksInPath().standardizedFileURL.pathComponents
+        if components.starts(with: rootURL.pathComponents) { throw PackageError.invalidDestination }
+        for depth in stride(from: components.count, through: 1, by: -1) {
+            let ancestor = URL(fileURLWithPath: NSString.path(withComponents: Array(components.prefix(depth))), isDirectory: true)
+            let resolved = ancestor.resolvingSymlinksInPath().standardizedFileURL
+            guard let existing = try? Directory(resolved) else { continue }
+            // Resolve the nearest existing ancestor first: a missing leaf does not resolve ancestor
+            // symlinks on Foundation. Its canonical ancestors also catch aliases into Media.
+            let canonical = resolved.pathComponents
+            if canonical.starts(with: rootURL.pathComponents) { throw PackageError.invalidDestination }
+            for prefix in stride(from: canonical.count, through: 1, by: -1) {
+                let url = URL(fileURLWithPath: NSString.path(withComponents: Array(canonical.prefix(prefix))), isDirectory: true)
+                if let directory = prefix == canonical.count ? existing : try? Directory(url),
+                   sameFile(directory.info, root.info) { throw PackageError.invalidDestination }
+            }
+            return
+        }
+        throw PackageError.invalidDestination
+    }
+
     /// Replace only the exact previously opened/saved package. Staging is a sibling; resources and
     /// metadata publish together. An unrelated directory or a stale/ABA document is never overwritten.
     public static func update(_ project: ScoreProject, replacing expected: Snapshot,
@@ -128,6 +155,7 @@ public enum PortableProjectPackage {
         guard destination.isFileURL, !destination.path.contains("\0"),
               destination.pathExtension == fileExtension,
               !["", ".", ".."].contains(destination.lastPathComponent) else { throw PackageError.invalidDestination }
+        if expected == nil, let sourceRoot { try validateDestination(destination, outside: sourceRoot) }
         let parentURL = destination.deletingLastPathComponent().resolvingSymlinksInPath().standardizedFileURL
         let parent = try Directory(parentURL)
         let destinationName = destination.lastPathComponent

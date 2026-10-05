@@ -387,4 +387,49 @@ struct NativeProjectPackageTests {
         }
         #expect(!FileManager.default.fileExists(atPath: copy.path))
     }
+
+    @Test(arguments: [ProjectSaveRequest.Format.linked, .collected], [false, true])
+    func nestedSaveDestinationsPreserveTheActivePackage(format: ProjectSaveRequest.Format, copy: Bool) async throws {
+        let h = StemReviewHarness(); defer { h.cleanEvidence() }
+        let original = try h.fixture("nested-original", duration: 4)
+        let originalBytes = try Data(contentsOf: original)
+        let active = h.evidence.appendingPathComponent("Active.roughscorepkg")
+        let alias = h.evidence.appendingPathComponent("package-alias")
+        let mediaAlias = h.evidence.appendingPathComponent("media-alias")
+        let w = Workspace(services: h.services()); defer { w.shutdown() }
+        #expect(await w.loadAudio(at: original)?.value == true)
+        #expect(w.saveAs(to: active, format: .collected))
+        try FileManager.default.createSymbolicLink(at: alias, withDestinationURL: active)
+        try FileManager.default.createSymbolicLink(at: mediaAlias, withDestinationURL: active.appendingPathComponent("Media"))
+        let baseline = w.project
+        let json = try Data(contentsOf: active.appendingPathComponent("project.json"))
+        var parents = [active, active.appendingPathComponent("Media"), alias, mediaAlias,
+                       active.appendingPathComponent("not-created/deeper")]
+        let caseAlias = h.evidence.appendingPathComponent("ACTIVE.roughscorepkg")
+        if FileManager.default.fileExists(atPath: caseAlias.path) { parents.append(caseAlias) }
+        for parent in parents {
+            let destination = parent.appendingPathComponent("nested." + format.fileExtension)
+            let result = copy ? w.saveCopy(to: destination, format: format) : w.saveAs(to: destination, format: format)
+            #expect(!result)
+            #expect(!FileManager.default.fileExists(atPath: destination.path))
+            #expect(w.activeProjectURL == active && w.project == baseline && !w.dirty && !w.canUndo)
+            #expect(try PortableProjectPackage.read(at: active).project == baseline)
+            #expect(try Data(contentsOf: active.appendingPathComponent("project.json")) == json)
+        }
+        // A similar path prefix is a legitimate sibling, and Copy keeps the active autosave target.
+        let sibling = h.evidence.appendingPathComponent("Active.roughscorepkg-copy." + format.fileExtension)
+        #expect(w.saveCopy(to: sibling, format: format))
+        #expect(w.activeProjectURL == active && w.project == baseline && !w.dirty)
+        w.addEvent(time: 3, string: 2)
+        let edited = w.project, selection = w.selectedIDs, state = w.saveState
+        let nested = active.appendingPathComponent("Media/dirty-copy." + format.fileExtension)
+        let rejected = copy ? w.saveCopy(to: nested, format: format) : w.saveAs(to: nested, format: format)
+        #expect(!rejected && w.dirty && w.project == edited && w.selectedIDs == selection && w.canUndo)
+        if copy { #expect(w.saveState == state) }
+        #expect(try Data(contentsOf: active.appendingPathComponent("project.json")) == json)
+        await w.awaitAutosave()
+        #expect(!w.dirty && w.canUndo)
+        #expect(try PortableProjectPackage.read(at: active).project == edited)
+        #expect(try Data(contentsOf: original) == originalBytes)
+    }
 }

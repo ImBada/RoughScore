@@ -2032,6 +2032,9 @@ final class Workspace: ObservableObject {
         }
         do {
             guard destination.pathExtension == format.fileExtension else { throw CocoaError(.fileWriteInvalidFileName) }
+            if let currentPackage, !(replaceActive && format == .collected) {
+                try PortableProjectPackage.validateDestination(destination, outside: currentPackage.root)
+            }
             var saved = try snapshot.validated()
             let package: PortableProjectPackage.Snapshot?
             if format == .collected {
