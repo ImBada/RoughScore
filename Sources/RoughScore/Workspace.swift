@@ -8,6 +8,7 @@ import UniformTypeIdentifiers
 final class Workspace: ObservableObject {
     @Published var project = ScoreProject.demo {
         didSet {
+            if oldValue != project { modelGeneration &+= 1 }
             if oldValue.tuning != project.tuning || oldValue.tuningDefinition != project.tuningDefinition ||
                 oldValue.duration != project.duration || oldValue.events.first(where: { $0.id == selectedID }) != selected {
                 clearPitchDetection()
@@ -61,6 +62,8 @@ final class Workspace: ObservableObject {
     @Published private(set) var pitchProposals: [MonophonicTranscriber.Proposal] = []
     @Published var status = "데모 준비 중"
     @Published var error: String?
+    // Separate, nonmodal feedback cannot overwrite a save/load error or nest an NSAlert.
+    @Published var externalOpenError: String?
     @Published private(set) var exportSnapshot: ScoreExportSnapshot?
     @Published private(set) var exportBusy = false
     @Published var isDemo = true
@@ -174,6 +177,7 @@ final class Workspace: ObservableObject {
     var canSave: Bool { canEdit && saveOperation == nil }
 
     private var projectRevision: UInt64 = 0
+    private var modelGeneration: UInt64 = 0
     private var player: (any AudioPlayerTransport)?
     private struct PreparedPlayer {
         let transport: any AudioPlayerTransport
@@ -201,6 +205,11 @@ final class Workspace: ObservableObject {
     private var startupPending: Bool
     private var started = false
     private var closed = false
+    var isClosed: Bool { closed }
+    var externalOpenDidShutdown: (() -> Void)?
+    var externalOpenDidCancelLoad: (() -> Void)?
+    private var automaticStartupOperationID: UUID?
+    private var externalProjectOperationID: UUID?
     @Published private var projectIdentity = UUID()
     var editorIdentity: UUID { projectIdentity }
     private var loadTask: Task<Bool, Never>?
@@ -367,12 +376,82 @@ final class Workspace: ObservableObject {
     @discardableResult
     func start() -> Task<Bool, Never>? {
         guard !started, !closed else { return nil }
+        startLifecycle()
+        guard let operation = reserveLoad() else { return nil }
+        automaticStartupOperationID = operation.id
+        return launchLoad(.startup, operation: operation)
+    }
+
+    private func startLifecycle() {
+        guard !started, !closed else { return }
         started = true
         timer = Timer.scheduledTimer(withTimeInterval: 0.03, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.tick() }
         }
-        guard let operation = reserveLoad() else { return nil }
-        return launchLoad(.startup, operation: operation)
+    }
+
+    enum ExternalProjectAdmission {
+        case loading(Task<Bool, Never>), cancelled, rejected(String)
+    }
+
+    private struct ExternalAuthorization: Equatable {
+        let identity: UUID
+        let revision: UInt64
+        let generation: UInt64
+        let project: ScoreProject
+        let url: URL?
+        let dirty: Bool
+    }
+    private var externalAuthorization: ExternalAuthorization {
+        .init(identity: projectIdentity, revision: projectRevision, generation: modelGeneration,
+              project: project, url: projectURL, dirty: dirty)
+    }
+    // A receipt is captured by the ordinary writer before injected remember/session callbacks.
+    // Only that exact committed save may rebase an external-open authorization.
+    private struct ExternalSaveReceipt {
+        let before: ExternalAuthorization
+        let after: ExternalAuthorization
+    }
+    private var lastSaveReceipt: ExternalSaveReceipt?
+
+    func admitExternalProject(at url: URL, ownsRequest: () -> Bool) -> ExternalProjectAdmission {
+        let retry = "다른 작업이 진행 중입니다. 작업을 마친 뒤 프로젝트 열기를 다시 시도하세요."
+        guard !closed, ownsRequest() else { return .rejected("종료된 작업 공간에서는 프로젝트를 열 수 없습니다.") }
+        let starting = startupPending || (automaticStartupOperationID != nil && automaticStartupOperationID == loadOperation?.id)
+        guard !analyzing, saveOperation == nil, exportSnapshot == nil, !exportBusy,
+              !services.nativeModalActive(), starting || canLoad else { return .rejected(retry) }
+
+        if !starting {
+            let before = externalAuthorization
+            var expected = before
+            if dirty {
+                let decision = services.discardDecision()
+                // The native modal loop can mutate/replace/close the document or request owner.
+                guard ownsRequest(), !closed, externalAuthorization == before, canLoad,
+                      saveOperation == nil, !services.nativeModalActive() else { return .rejected(retry) }
+                switch decision {
+                case .cancel: return .cancelled
+                case .discard: break
+                case .saveAndContinue:
+                    lastSaveReceipt = nil
+                    save()
+                    guard let receipt = lastSaveReceipt, !dirty else { return .cancelled }
+                    guard receipt.before == before else { return .rejected(retry) }
+                    expected = receipt.after
+                }
+            }
+            guard ownsRequest(), !closed, externalAuthorization == expected, canLoad,
+                  saveOperation == nil, !services.nativeModalActive() else { return .rejected(retry) }
+        }
+        guard ownsRequest(), !closed else { return .rejected(retry) }
+        // Only the automatic startup operation may be superseded. No fallback is restarted.
+        if automaticStartupOperationID != nil { cancelLoading() }
+        startLifecycle()
+        guard let operation = reserveLoad(requestFocus: false), let task = launchLoad(.project(url), operation: operation) else {
+            return .rejected(retry)
+        }
+        externalProjectOperationID = operation.id
+        return .loading(task)
     }
 
     func tick() {
@@ -1085,12 +1164,12 @@ final class Workspace: ObservableObject {
                             stringDelta: preview.string - original.string))
     }
 
-    func cancelPositionDrag() {
+    func cancelPositionDrag(requestFocus: Bool = true) {
         guard canEdit else { return }
         positionDrag = nil; positionMagnetTargetID = nil; magnetDragInput = nil
         dragSelection = nil; dragEvents = nil
         status = "이동 취소 · 선택 유지 · Esc를 다시 누르면 선택 해제"
-        requestKeyboardFocus?()
+        if requestFocus { requestKeyboardFocus?() }
     }
     func moveSelectedPosition(to time: Double, string: Int? = nil) {
         guard canMutateNotes, let selected, time.isFinite else { return }
@@ -1754,9 +1833,9 @@ final class Workspace: ObservableObject {
         return launchLoad(.demo(long), operation: operation)
     }
 
-    private func reserveLoad() -> LoadOperation? {
+    private func reserveLoad(requestFocus: Bool = true) -> LoadOperation? {
         guard !closed, !analyzing, saveOperation == nil, loadOperation == nil, !busy || startupPending else { return nil }
-        cancelPositionDrag(); endMemoEditing()
+        cancelPositionDrag(requestFocus: requestFocus); endMemoEditing()
         clearPitchDetection()
         flushSession()
         let operation = LoadOperation(projectID: projectIdentity, snapshot: project, session: currentSession)
@@ -1778,6 +1857,11 @@ final class Workspace: ObservableObject {
     /// A cancelled service may still finish. Its token cannot commit, publish or clear a newer busy state.
     func cancelLoading() {
         guard loadOperation != nil else { return }
+        if externalProjectOperationID == loadOperation?.id {
+            externalProjectOperationID = nil
+            externalOpenDidCancelLoad?()
+        }
+        automaticStartupOperationID = nil
         loadTask?.cancel(); loadTask = nil; loadOperation = nil
         busy = false; loadProgress = 0
         if !closed { status = "오디오 준비 취소됨 · 이전 작업 유지"; scheduleAutosave(); sessionChanged() }
@@ -1927,6 +2011,8 @@ final class Workspace: ObservableObject {
                 if let url = staged?.demoURL { try? FileManager.default.removeItem(at: url) }
             }
             if loadOperation?.id == operation.id {
+                if automaticStartupOperationID == operation.id { automaticStartupOperationID = nil }
+                if externalProjectOperationID == operation.id { externalProjectOperationID = nil }
                 loadTask = nil; loadOperation = nil; busy = false
                 if !closed { scheduleAutosave(); sessionChanged() }
             }
@@ -2147,6 +2233,7 @@ final class Workspace: ObservableObject {
     private func writeSave(to destination: URL, format: ProjectSaveRequest.Format, copy: Bool, replaceActive: Bool) -> Bool {
         guard canSave else { return false }
         let token = UUID(), identity = projectIdentity, revision = projectRevision, snapshot = project
+        let authorization = externalAuthorization
         saveOperation = token
         if !copy { autosaveTask?.cancel(); autosaveTask = nil; saveState = .saving }
         defer {
@@ -2158,7 +2245,8 @@ final class Workspace: ObservableObject {
         var copiedAudio: URL?
         let requireSave = {
             guard !self.closed, self.saveOperation == token, self.projectIdentity == identity,
-                  self.projectRevision == revision, self.project == snapshot else { throw CancellationError() }
+                  self.projectRevision == revision, self.modelGeneration == authorization.generation,
+                  self.project == snapshot else { throw CancellationError() }
         }
         do {
             guard destination.pathExtension.lowercased() == format.fileExtension else { throw CocoaError(.fileWriteInvalidFileName) }
@@ -2218,12 +2306,14 @@ final class Workspace: ObservableObject {
                 return true
             }
             flushSession()
+            try requireSave()
             // Save As rebases active document/media locations without changing editorIdentity.
             // A request captured against the previous storage binding no longer owns an export.
             if !replaceActive { cancelExport() }
             project = saved; savedProject = saved; projectURL = destination; currentPackage = package
             rebasePreparedSources(to: saved, package: package)
             refreshSaveState()
+            lastSaveReceipt = .init(before: authorization, after: externalAuthorization)
             services.rememberProject(destination)
             status = "프로젝트 저장 완료 · 이후 입력은 자동 저장"
             flushSession()
@@ -2353,14 +2443,10 @@ final class Workspace: ObservableObject {
 
     func confirmDiscard() -> Bool {
         guard dirty else { return true }
-        let alert = NSAlert()
-        alert.messageText = "저장하지 않은 TAB 변경 사항이 있습니다."
-        alert.informativeText = "저장한 뒤 계속하거나, 변경 사항을 버릴 수 있습니다."
-        alert.addButton(withTitle: "저장하고 계속"); alert.addButton(withTitle: "취소"); alert.addButton(withTitle: "변경 버리기")
-        switch alert.runModal() {
-        case .alertFirstButtonReturn: save(); return !dirty
-        case .alertThirdButtonReturn: return true
-        default: return false
+        switch services.discardDecision() {
+        case .saveAndContinue: save(); return !dirty
+        case .discard: return true
+        case .cancel: return false
         }
     }
 
@@ -2380,6 +2466,8 @@ final class Workspace: ObservableObject {
         guard !closed else { return }
         flushSession()
         closed = true; startupPending = false
+        externalOpenDidShutdown?(); externalOpenDidShutdown = nil
+        externalOpenDidCancelLoad = nil
         clearPitchDetection()
         nativeTextObserver?.cancel(); nativeTextObserver = nil; memoSession = nil
         cancelLoading(); cancelAnalysis()

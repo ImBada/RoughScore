@@ -28,7 +28,8 @@ variable from the caller is trusted. Compressed bytes may differ across Apple
 encoder versions; the PCM source hash and encoding settings are recorded.
 
 Coverage verification rejects zero/missing Swift Testing cases, incomplete
-baseline coverage and the optional audio test's silent early return. The existing
+baseline coverage, the optional audio test's silent early return, and absent
+external-intake suite/case pass markers. The existing
 test calls its message `Real audio`; in this job that means **generated compressed
 codec input**, not a real guitar quality measurement. Licensed/labeled real guitar
 evaluation is explicitly **SKIPPED** in the summary. This subset does not edit the
@@ -46,6 +47,11 @@ The explicit label configuration permits the documented `xcode-27` hosted
 preview because actionlint 1.7.12's built-in runner list predates that label.
 No other unknown labels or expression errors are suppressed.
 
-Related to #18: final bundle/archive checks, Finder document registration and
-file-open lifecycle regressions remain with the integration owner after the P0
-dependencies. A release executable build is not a notarized distribution.
+For #18, `scripts/build-app.sh NEW_OUTPUT_DIRECTORY --version 0.1.0 --build 1`
+separately builds and verifies a fresh native app, document metadata, ad-hoc seal,
+versioned ZIP, checksum and source/toolchain manifest. See
+[`docs/DEVELOPER-INSTALL.md`](../../docs/DEVELOPER-INSTALL.md). Unit/hosted tests
+exercise the actual URL callback and transaction lifecycle; actual Finder cold/warm
+and dirty-dialog delivery still need native QA. A release executable or ad-hoc
+bundle is not a notarized distribution. GitHub CI remains disabled by user choice;
+do not enable/dispatch it or add publishing workflows to run these local checks.

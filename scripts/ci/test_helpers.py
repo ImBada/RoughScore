@@ -8,12 +8,14 @@ import unittest
 import wave
 
 from generate_audio import generate
-from verify_test_log import verify
+from verify_test_log import INTAKE_TESTS, verify
 
 
 class CoverageReportingTests(unittest.TestCase):
     def log(self, count=72, fixture=True):
         return ("Test realAudioFixtureWhenProvided() passed\n" +
+                "Suite ExternalProjectIntakeTests passed\n" +
+                "".join(f"Test {name}() passed\n" for name in INTAKE_TESTS) +
                 ("Real audio: 2.0s, 200 bins/channel\n" if fixture else "") +
                 f"Test run with {count} tests in 9 suites passed\n")
 
@@ -32,6 +34,8 @@ class CoverageReportingTests(unittest.TestCase):
     def test_missing_fixture_test_result_is_rejected(self):
         with self.assertRaises(ValueError):
             verify(self.log().replace("Test realAudioFixtureWhenProvided() passed", ""))
+        with self.assertRaises(ValueError):
+            verify(self.log().replace(f"Test {INTAKE_TESTS[0]}() passed", ""))
 
     def test_generated_coverage_is_not_real_guitar_quality(self):
         result = verify(self.log(count=80))

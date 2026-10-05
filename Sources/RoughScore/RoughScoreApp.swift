@@ -3,14 +3,32 @@ import SwiftUI
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
-    weak var workspace: Workspace?
+    private(set) weak var workspace: Workspace?
+    let externalProjects = ExternalProjectIntake()
+    var showMainWindow: (() -> Void)?
+
+    func bind(_ workspace: Workspace, showMainWindow: (() -> Void)? = nil) {
+        self.workspace = workspace
+        if let showMainWindow { self.showMainWindow = showMainWindow }
+        externalProjects.bind(workspace)
+    }
+    // URL document delivery supersedes openFile/openFiles. It has no open/print reply contract.
+    func application(_ application: NSApplication, open urls: [URL]) {
+        _ = externalProjects.receive(urls)
+        showMainWindow?()
+    }
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
     }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        externalProjects.beginTermination()
         workspace?.cancelLoading()
-        guard workspace?.confirmDiscard() ?? true else { return .terminateCancel }
+        guard workspace?.confirmDiscard() ?? true else {
+            externalProjects.cancelTermination()
+            return .terminateCancel
+        }
+        externalProjects.shutdown()
         workspace?.shutdown()
         return .terminateNow
     }
@@ -18,14 +36,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
 @main
 struct RoughScoreApp: App {
-    @StateObject private var workspace = Workspace(awaitsStartup: true)
+    @StateObject private var workspace: Workspace
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
+    @Environment(\.openWindow) private var openWindow
+    init() { self.init(services: { .live }) }
+    // Native QA can construct the same app owner with isolated cache/session/preferences
+    // before Workspace initialization. Production has no environment-based override.
+    init(services: @escaping @MainActor () -> WorkspaceServices) {
+        _workspace = StateObject(wrappedValue: Workspace(services: services(), awaitsStartup: true))
+    }
     var body: some Scene {
         Window("RoughScore", id: "main") {
             WorkspaceView(workspace: workspace)
                 .frame(minWidth: 1120, minHeight: 740)
                 .preferredColorScheme(.dark)
-                .task { delegate.workspace = workspace; workspace.start() }
+                .task {
+                    delegate.bind(workspace, showMainWindow: {
+                        openWindow(id: "main") // Reopen the same single Window if it was closed.
+                        NSApp.activate(ignoringOtherApps: true)
+                    })
+                }
         }
         .defaultSize(width: 1440, height: 900)
         .commands {
