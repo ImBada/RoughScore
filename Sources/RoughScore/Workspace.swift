@@ -1844,9 +1844,10 @@ final class Workspace: ObservableObject {
         flushSession()
         let session = currentSession
         // Session persistence and focus callbacks may reenter while no load owns the slot.
-        // Fence the exact native authorization before capturing a newer model or marking busy.
+        // Fence the exact native authorization and live export eligibility after every callback,
+        // before capturing a newer model or marking busy. Startup is never an export exception.
         guard authorizesReservation(), !closed, !analyzing, saveOperation == nil, loadOperation == nil,
-              !busy || startupPending else { return nil }
+              !busy || startupPending, exportSnapshot == nil, !exportBusy else { return nil }
         let operation = LoadOperation(projectID: projectIdentity, snapshot: project, session: session)
         startupPending = false
         loadOperation = operation
