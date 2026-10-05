@@ -1741,7 +1741,7 @@ final class Workspace: ObservableObject {
     }
 
     private func stageProject(_ url: URL, operation: LoadOperation) async throws -> StagedWorkspace {
-        let package = url.pathExtension == PortableProjectPackage.fileExtension ? try await services.readPackage(url) : nil
+        let package = url.pathExtension.lowercased() == PortableProjectPackage.fileExtension ? try await services.readPackage(url) : nil
         let loaded: ScoreProject
         if let package { loaded = package.project }
         else {
@@ -2002,7 +2002,7 @@ final class Workspace: ObservableObject {
     /// Ordinary save/autosave retain their active-destination semantics. A different URL is Save As.
     @discardableResult
     func save(to destination: URL) -> Bool {
-        let format: ProjectSaveRequest.Format = destination.pathExtension == PortableProjectPackage.fileExtension ? .collected : .linked
+        let format: ProjectSaveRequest.Format = destination.pathExtension.lowercased() == PortableProjectPackage.fileExtension ? .collected : .linked
         return writeSave(to: destination, format: format, copy: false, replaceActive: destination.standardizedFileURL == projectURL?.standardizedFileURL)
     }
     @discardableResult
@@ -2031,7 +2031,7 @@ final class Workspace: ObservableObject {
                   self.projectRevision == revision, self.project == snapshot else { throw CancellationError() }
         }
         do {
-            guard destination.pathExtension == format.fileExtension else { throw CocoaError(.fileWriteInvalidFileName) }
+            guard destination.pathExtension.lowercased() == format.fileExtension else { throw CocoaError(.fileWriteInvalidFileName) }
             if let currentPackage, !(replaceActive && format == .collected) {
                 try PortableProjectPackage.validateDestination(destination, outside: currentPackage.root)
             }

@@ -35,12 +35,16 @@ struct WorkspaceServices: Sendable {
     var nativeTextUndo: @MainActor @Sendable () -> NativeTextUndoTarget? = { NativeTextUndoTarget.active() }
     var fileExists: @Sendable (URL) -> Bool
     var initialProject: @MainActor @Sendable () -> URL? = {
-        CommandLine.arguments.dropFirst().first(where: {
-            ["roughscore", PortableProjectPackage.fileExtension].contains(URL(fileURLWithPath: $0).pathExtension)
-        }).map { URL(fileURLWithPath: $0) }
+        initialProjectURL(arguments: CommandLine.arguments)
     }
     var lastProject: @MainActor @Sendable () -> URL?
     var rememberProject: @MainActor @Sendable (URL) -> Void
+
+    static func initialProjectURL(arguments: [String]) -> URL? {
+        arguments.dropFirst().first(where: {
+            ["roughscore", PortableProjectPackage.fileExtension].contains(URL(fileURLWithPath: $0).pathExtension.lowercased())
+        }).map { URL(fileURLWithPath: $0) }
+    }
 
     @MainActor static var live: WorkspaceServices {
         switch AudioCacheEnvironment.shared {

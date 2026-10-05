@@ -58,7 +58,7 @@ public enum PortableProjectPackage {
 
     /// Checkpoints also provide deterministic failure injection to package IO tests. No global mutable hooks.
     enum Checkpoint: Equatable {
-        case copying(Int), writingProject, validating, committing
+        case copying(Int), writingProject, validating, committing, publishing, rollingBack
     }
     struct Hooks {
         var checkpoint: (Checkpoint) throws -> Void = { _ in }
@@ -128,7 +128,11 @@ public enum PortableProjectPackage {
         let parent = try Directory(parentURL)
         let name = ".roughscore-metadata-" + UUID().uuidString
         let file = try parent.createFile(name)
-        defer { parent.removeCreatedEntries() }
+        var retainStage = false
+        defer { if !retainStage { parent.removeCreatedEntries() } }
+        let oldDocument = read.fence.files[0].1
+        try oldDocument.handle.seek(toOffset: 0)
+        let oldBytes = try oldDocument.handle.readToEnd() ?? Data()
         try hooks.checkpoint(.writingProject)
         let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         let data = try encoder.encode(Document(format: format, version: version, project: candidate))
@@ -144,7 +148,18 @@ public enum PortableProjectPackage {
         try read.fence.revalidate()
         guard parent.isAt(parentURL), parent.matches(name, file.info),
               sameState(try parent.file(name).info, writtenInfo) else { throw PackageError.sourceChanged }
-        guard renameat(parent.fd, name, read.fence.directory.fd, "project.json") == 0 else { throw posixError() }
+        do {
+            try AtomicDocumentPublication.replace(stagingParent: parent.fd, stagedName: name,
+                destinationParent: read.fence.directory.fd, destinationName: "project.json",
+                recoveryURL: parentURL.appendingPathComponent(name),
+                verifyOld: { try AtomicDocumentPublication.matchesFile(parent: $0, name: $1, receipt: oldDocument.info, bytes: oldBytes) },
+                verifyNew: { try AtomicDocumentPublication.matchesFile(parent: $0, name: $1, receipt: writtenInfo, bytes: data) },
+                removeOld: { if parent.matches(name, oldDocument.info) { _ = unlinkat(parent.fd, name, 0) } },
+                beforePublication: { try hooks.checkpoint(.publishing) }, beforeRollback: { try hooks.checkpoint(.rollingBack) })
+        } catch let conflict as AtomicDocumentPublication.Conflict {
+            retainStage = conflict.recoveryURL != nil
+            throw conflict
+        }
         return Snapshot(root: expected.root, project: candidate, directory: read.fence.directory.info, document: file.info)
     }
 
@@ -153,7 +168,7 @@ public enum PortableProjectPackage {
         var candidate = try project.validated()
         try check(cancellation)
         guard destination.isFileURL, !destination.path.contains("\0"),
-              destination.pathExtension == fileExtension,
+              destination.pathExtension.lowercased() == fileExtension,
               !["", ".", ".."].contains(destination.lastPathComponent) else { throw PackageError.invalidDestination }
         if expected == nil, let sourceRoot { try validateDestination(destination, outside: sourceRoot) }
         let parentURL = destination.deletingLastPathComponent().resolvingSymlinksInPath().standardizedFileURL
@@ -262,16 +277,20 @@ public enum PortableProjectPackage {
         if let previous {
             try previous.fence.revalidate()
             guard parent.matches(destinationName, previous.fence.directory.info) else { throw PackageError.sourceChanged }
-            guard renameatx_np(parent.fd, stageName, parent.fd, destinationName, UInt32(RENAME_SWAP)) == 0 else {
-                throw posixError()
+            do {
+                try AtomicDocumentPublication.replace(stagingParent: parent.fd, stagedName: stageName,
+                    destinationParent: parent.fd, destinationName: destinationName, recoveryURL: stageURL,
+                    verifyOld: { try previous.fence.matchesContents(parent: $0, name: $1) },
+                    verifyNew: { try validated.fence.matchesContents(parent: $0, name: $1) },
+                    removeOld: {
+                        previous.fence.removeVerifiedEntries()
+                        if parent.matches(stageName, previous.fence.directory.info) { _ = unlinkat(parent.fd, stageName, AT_REMOVEDIR) }
+                    }, beforePublication: { try hooks.checkpoint(.publishing) }, beforeRollback: { try hooks.checkpoint(.rollingBack) })
+            } catch let conflict as AtomicDocumentPublication.Conflict {
+                committed = conflict.recoveryURL != nil // Keep every entry of an unexpected retained version.
+                throw conflict
             }
             committed = true
-            // Only the verified old document's declared entries, through retained descriptors.
-            // Unknown/replaced entries are left alone; never recursively delete a pathname.
-            if parent.matches(stageName, previous.fence.directory.info) {
-                previous.fence.removeVerifiedEntries()
-                if parent.matches(stageName, previous.fence.directory.info) { _ = unlinkat(parent.fd, stageName, AT_REMOVEDIR) }
-            }
         } else {
             // RENAME_EXCL atomically rejects collisions, including late creations.
             guard renameatx_np(parent.fd, stageName, parent.fd, destinationName, UInt32(RENAME_EXCL)) == 0 else {
@@ -351,6 +370,18 @@ public enum PortableProjectPackage {
         let directory: Directory
         let files: [(String, File)]
         let directories: [(String, Directory)]
+        func matchesContents(parent: Int32, name: String) throws -> Bool {
+            var entry = stat()
+            guard fstatat(parent, name, &entry, AT_SYMLINK_NOFOLLOW) == 0,
+                  AtomicDocumentPublication.sameContentState(entry, directory.info) else { return false }
+            for (path, file) in files {
+                guard file.unchanged, sameState(try directory.file(path).info, file.info) else { return false }
+            }
+            for (name, child) in directories {
+                guard child.unchanged, directory.matches(name, child.info) else { return false }
+            }
+            return true
+        }
         func removeVerifiedEntries() {
             for (path, file) in files {
                 if path == "project.json", directory.matches(path, file.info) { _ = unlinkat(directory.fd, path, 0) }

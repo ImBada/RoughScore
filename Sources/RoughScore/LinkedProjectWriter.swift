@@ -9,7 +9,8 @@ enum LinkedProjectWriter {
     /// Publish over only the current durable document. The writer sees a private stage with the
     /// destination basename, so a callback failure never changes the active document's bytes.
     static func replace(_ data: Data, at destination: URL, expected: ScoreProject,
-                        write: (Data, URL) throws -> Void, cancellation: () throws -> Void) throws {
+                        write: (Data, URL) throws -> Void, cancellation: () throws -> Void,
+                        beforePublication: () throws -> Void = {}, beforeRollback: () throws -> Void = {}) throws {
         let parentURL = destination.deletingLastPathComponent().resolvingSymlinksInPath().standardizedFileURL
         let parent = open(parentURL.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
         guard parent >= 0 else { throw failure() }; defer { close(parent) }
@@ -30,9 +31,10 @@ enum LinkedProjectWriter {
         guard stage >= 0 else { throw failure() }; defer { close(stage) }
         var stageInfo = stat(); guard fstat(stage, &stageInfo) == 0 else { throw failure() }
         var createdFile: stat?
+        var retainStage = false
         defer {
             var current = stat()
-            if fstatat(parent, stageName, &current, AT_SYMLINK_NOFOLLOW) == 0,
+            if !retainStage, fstatat(parent, stageName, &current, AT_SYMLINK_NOFOLLOW) == 0,
                current.st_dev == stageInfo.st_dev, current.st_ino == stageInfo.st_ino {
                 // Only the regular file created by this writer is eligible for cleanup.
                 if let createdFile, fstatat(stage, name, &current, AT_SYMLINK_NOFOLLOW) == 0,
@@ -75,12 +77,25 @@ enum LinkedProjectWriter {
         var stagedNow = stat()
         guard fstatat(stage, name, &stagedNow, AT_SYMLINK_NOFOLLOW) == 0,
               sameState(stagedNow, written) else { throw CocoaError(.fileWriteUnknown) }
-        guard renameat(stage, name, parent, name) == 0 else { throw failure() }
+        do {
+            try AtomicDocumentPublication.replace(stagingParent: stage, stagedName: name,
+                destinationParent: parent, destinationName: name, recoveryURL: target,
+                verifyOld: { try AtomicDocumentPublication.matchesFile(parent: $0, name: $1, receipt: oldInfo, bytes: before) },
+                verifyNew: { try AtomicDocumentPublication.matchesFile(parent: $0, name: $1, receipt: written, bytes: data) },
+                removeOld: {
+                    var displaced = stat()
+                    if fstatat(stage, name, &displaced, AT_SYMLINK_NOFOLLOW) == 0,
+                       displaced.st_dev == oldInfo.st_dev, displaced.st_ino == oldInfo.st_ino { _ = unlinkat(stage, name, 0) }
+                }, beforePublication: beforePublication, beforeRollback: beforeRollback)
+        } catch let conflict as AtomicDocumentPublication.Conflict {
+            retainStage = conflict.recoveryURL != nil
+            throw conflict
+        }
     }
 
     static func create(_ data: Data, at destination: URL,
                        write: (Data, URL) throws -> Void, cancellation: () throws -> Void) throws {
-        guard destination.isFileURL, destination.pathExtension == "roughscore",
+        guard destination.isFileURL, destination.pathExtension.lowercased() == "roughscore",
               !destination.path.contains("\0") else { throw CocoaError(.fileWriteInvalidFileName) }
         let parentURL = destination.deletingLastPathComponent().resolvingSymlinksInPath().standardizedFileURL
         let parent = open(parentURL.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
