@@ -74,6 +74,23 @@ private actor IntakeReadGate {
 
 @MainActor @Suite(.serialized)
 struct ExternalProjectIntakeTests {
+    @Test(arguments: ["content", "structural"])
+    func acceptedRetryClearsOnlyFeedbackFromEarlierRequests(failure: String) async throws {
+        let f = try IntakeFixture(); defer { f.clean() }
+        let a = try f.document("A.roughscore"), b = try f.document("B.roughscore")
+        let (w, d) = try await f.cold(a); defer { w.shutdown() }
+        let invalid = f.root.appendingPathComponent("invalid.roughscore")
+        try Data("invalid JSON".utf8).write(to: invalid)
+        d.application(NSApplication.shared, open: failure == "content" ? [invalid] : [a, b])
+        if let task = d.externalProjects.task { #expect(!(await task.value)) }
+        #expect(w.activeProjectURL == a && w.externalOpenError != nil)
+        d.application(NSApplication.shared, open: [b])
+        #expect(w.externalOpenError == nil && d.externalProjects.lastRejection == nil)
+        #expect(await d.externalProjects.task?.value == true)
+        #expect(w.activeProjectURL == b && w.externalOpenError == nil)
+        #expect(f.capture.remembered == [a, b])
+    }
+
     @Test func nativeCallbackQueuesFirstWinsAndStartsLifecycleOnce() async throws {
         let f = try IntakeFixture(); defer { f.clean() }
         let a = try f.document("첫 번째 A.ROUGHScore"), b = try f.document("B.roughscore")

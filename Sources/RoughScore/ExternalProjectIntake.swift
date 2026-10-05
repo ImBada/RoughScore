@@ -49,6 +49,10 @@ final class ExternalProjectIntake {
         guard pending == nil, requestID == nil else {
             return reject("이전 프로젝트 열기 요청이 진행 중입니다. 완료한 뒤 다시 시도하세요.")
         }
+        // A new accepted request supersedes earlier feedback. Later rejected requests
+        // keep their own message, including requests rejected before the first bind.
+        lastRejection = nil
+        workspace?.externalOpenError = nil
         let request = Request(url: url)
         guard let workspace else { pending = request; return .queued }
         return begin(request, workspace: workspace)
