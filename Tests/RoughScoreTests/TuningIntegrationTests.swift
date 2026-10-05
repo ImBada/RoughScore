@@ -31,7 +31,7 @@ private actor PitchEstimateGate {
 @Suite(.serialized)
 struct TuningIntegrationTests {
     private func services() -> WorkspaceServices {
-        var value = WorkspaceServices.live
+        var value = WorkspaceServices.isolatedCache()
         value.rememberProject = { _ in }; value.lastProject = { nil }; value.chooseSaveDestination = { _ in nil }
         value.nativeTextUndo = { nil }
         return value
@@ -215,7 +215,8 @@ struct TuningIntegrationTests {
         let gate = PitchEstimateGate()
         var service = services()
         service.detectPitch = { _, _ in try await gate.estimate() }
-        service.makePlayer = { url in
+        service.makePlayer = { audio, source in
+            let url = audio.url(for: source)
             if action == "sourceFailure" { throw AudioIssue.playbackFailed }
             return try AVAudioPlayer(contentsOf: url)
         }
@@ -303,7 +304,7 @@ struct TuningIntegrationTests {
         var service = services()
         service.detectPitch = { _, _ in try await gate.estimate() }
         service.prepareTransport = { _ in }
-        service.makePlayer = { try AVAudioPlayer(contentsOf: $0) }
+        service.makePlayer = { try AVAudioPlayer(contentsOf: $0.url(for: $1)) }
         let workspace = Workspace(services: service); defer { workspace.shutdown() }
         let note = TabEvent(time: 0.2, lane: .left, string: 1, fret: 0)
         let url = try AudioPreparation.createDemo(project: ScoreProject(duration: 3, events: [note]))

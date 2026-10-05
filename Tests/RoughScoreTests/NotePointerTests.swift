@@ -36,7 +36,7 @@ struct NotePointerTests {
         #expect(try encoder.encode(events) == original)
     }
     private func workspace(_ events: [TabEvent], duration: Double = 32) -> Workspace {
-        var services = WorkspaceServices.live
+        var services = WorkspaceServices.isolatedCache()
         services.rememberProject = { _ in }; services.lastProject = { nil }; services.chooseSaveDestination = { _ in nil }
         let workspace = Workspace(services: services)
         workspace.project = ScoreProject(duration: duration, events: events)

@@ -56,10 +56,11 @@ private final class TransportFixture {
     }
     func services() -> WorkspaceServices {
         let audio = audio
-        var services = WorkspaceServices.live
+        var services = WorkspaceServices.isolatedCache()
         services.prepare = { _, _ in audio }
         services.prepareTransport = { _ in }
-        services.makePlayer = { [self] url in
+        services.makePlayer = { [self] audio, source in
+            let url = audio.url(for: source)
             constructions.append(url)
             duringConstruction?()
             if url == failURL { throw AudioIssue.unsupported }
@@ -230,10 +231,10 @@ struct WorkspaceTransportTests {
         w.switchSource(.left)
         #expect(w.busy && w.source == .stereo && w.playing && f.stereo.isPlaying)
         w.cancelLoading(); f.stereo.currentTime = 3.213
-        let directory = f.root.appendingPathComponent("late-prepared")
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let scratch = try OwnedAudioScratch(parent: f.root)
+        let directory = scratch.directoryURL
         await pending.finish(PreparedAudio(original: replacementURL, left: replacementURL, right: replacementURL,
-            directory: directory, duration: 20, isMono: false, leftPeaks: [], rightPeaks: []))
+            directory: directory, duration: 20, isMono: false, leftPeaks: [], rightPeaks: [], resource: .scratch(scratch)))
         #expect(!(await replacement.value))
         #expect(w.project == project && w.saveState == state && w.prepared?.directory == oldAudio.directory)
         #expect(w.playing && f.stereo.isPlaying && w.canEdit && w.source == .stereo)
