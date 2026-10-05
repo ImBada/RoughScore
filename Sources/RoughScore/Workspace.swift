@@ -2198,6 +2198,9 @@ final class Workspace: ObservableObject {
                 return true
             }
             flushSession()
+            // Save As rebases active document/media locations without changing editorIdentity.
+            // A request captured against the previous storage binding no longer owns an export.
+            if !replaceActive { cancelExport() }
             project = saved; savedProject = saved; projectURL = destination; currentPackage = package
             rebasePreparedSources(to: saved, package: package)
             refreshSaveState()
@@ -2275,6 +2278,15 @@ final class Workspace: ObservableObject {
 
     func beginExport(_ format: ScoreExportFormat) {
         guard canExport else { return }
+        let protection = exportDestinationProtection()
+        let waveform = prepared.map { ScoreRenderPlan.WaveformInput(duration: $0.duration, left: $0.leftPeaks,
+            right: $0.rightPeaks, label: assetRole == .original ? "Original" : "Imported Stem") }
+        exportSnapshot = ScoreExportSnapshot(projectID: projectIdentity, initialFormat: format, project: project,
+            selectedRange: selectionRange, analysis: .init(project: project, asset: activeAsset), waveform: waveform,
+            protectedFiles: protection.files, packageRoot: protection.root)
+    }
+
+    private func exportDestinationProtection() -> (files: [URL], root: URL?) {
         var files = [projectURL].compactMap { $0 }
         if let currentPackage { files.append(currentPackage.root.appendingPathComponent("project.json")) }
         if let path = project.audioPath { files.append(URL(fileURLWithPath: path)) }
@@ -2282,11 +2294,7 @@ final class Workspace: ObservableObject {
             if asset.reference.kind == .external { files.append(URL(fileURLWithPath: asset.reference.path)) }
             else if let currentPackage { files.append(currentPackage.root.appendingPathComponent(asset.reference.path)) }
         }
-        let waveform = prepared.map { ScoreRenderPlan.WaveformInput(duration: $0.duration, left: $0.leftPeaks,
-            right: $0.rightPeaks, label: assetRole == .original ? "Original" : "Imported Stem") }
-        exportSnapshot = ScoreExportSnapshot(projectID: projectIdentity, initialFormat: format, project: project,
-            selectedRange: selectionRange, analysis: .init(project: project, asset: activeAsset), waveform: waveform,
-            protectedFiles: files, packageRoot: currentPackage?.root)
+        return (files, currentPackage?.root)
     }
     func cancelExport() { exportSnapshot = nil }
 
@@ -2306,11 +2314,17 @@ final class Workspace: ObservableObject {
                 return completed
             }
             guard let url = destination ?? services.exportServices.chooseDestination(options.format, snapshot.project.title) else { return false }
+            try Task.checkCancellation()
             guard !closed, projectIdentity == snapshot.projectID, exportSnapshot?.id == snapshot.id else { return false }
-            try snapshot.validateDestination(url, format: options.format)
+            let protection = exportDestinationProtection()
+            try snapshot.validateDestination(url, format: options.format,
+                additionalProtectedFiles: protection.files, additionalPackageRoot: protection.root)
+            try Task.checkCancellation()
             try services.exportServices.write(data, url)
             if !closed, projectIdentity == snapshot.projectID { status = options.format.title + " 내보내기 완료" }
             return true
+        } catch is CancellationError {
+            return false
         } catch {
             if !closed, projectIdentity == snapshot.projectID { self.error = error.localizedDescription }
             return false

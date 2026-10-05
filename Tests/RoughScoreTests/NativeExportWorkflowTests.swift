@@ -14,6 +14,7 @@ import Testing
     var fail = false
     var destination: URL?
     var onChoose: (@MainActor @Sendable () -> Void)?
+    var savedDuringModal = false
 }
 
 @MainActor @Suite(.serialized)
@@ -107,6 +108,49 @@ struct NativeExportWorkflowTests {
         w.beginExport(.tab); let snapshot = try #require(w.exportSnapshot)
         #expect(await w.completeExport(snapshot, options: .init()) == false)
         #expect(capture.outputs.isEmpty && State(w) == before && !FileManager.default.fileExists(atPath: capture.destination!.path))
+    }
+
+    @Test(arguments: [false, true])
+    func reentrantCollectedSaveAsInvalidatesExportAndPreservesNewPackage(overwriteMedia: Bool) async throws {
+        let h = StemReviewHarness(); defer { h.cleanEvidence() }
+        let generated = try h.fixture("export-storage-change", duration: 3)
+        let source = h.evidence.appendingPathComponent(overwriteMedia ? "source.txt" : "source.caf")
+        try FileManager.default.copyItem(at: generated, to: source)
+        let bytes = try Data(contentsOf: source), asset = AudioAsset(reference: .init(path: source.path))
+        let package = h.evidence.appendingPathComponent("active.roughscorepkg")
+        let media = package.appendingPathComponent("Media/" + asset.id.uuidString + (overwriteMedia ? ".txt" : ".caf"))
+        let capture = ExportCapture(), w = Workspace(services: services(capture)); defer { w.shutdown() }
+        w.project = ScoreProject(audioPath: source.path, duration: 3); w.project.assets = [asset]
+        capture.destination = overwriteMedia ? media : package.appendingPathComponent("shared-tab.txt")
+        capture.onChoose = { [weak w] in capture.savedDuringModal = w?.saveAs(to: package, format: .collected) == true }
+        w.beginExport(.tab); let snapshot = try #require(w.exportSnapshot)
+        #expect(await w.completeExport(snapshot, options: .init()) == false)
+        #expect(capture.savedDuringModal && capture.outputs.isEmpty && w.exportSnapshot == nil)
+        #expect(w.activeProjectURL == package && (try? PortableProjectPackage.read(at: package)) != nil)
+        #expect(try Data(contentsOf: media) == bytes && Data(contentsOf: source) == bytes)
+    }
+
+    @Test func cancelledTaskReturningDestinationCannotWriteOrReportAnError() async throws {
+        let root = try root(); defer { try? FileManager.default.removeItem(at: root) }
+        let capture = ExportCapture(), w = Workspace(services: services(capture)); defer { w.shutdown() }
+        capture.destination = root.appendingPathComponent("cancelled.txt")
+        capture.onChoose = { withUnsafeCurrentTask { $0?.cancel() } }
+        w.beginExport(.tab); let snapshot = try #require(w.exportSnapshot)
+        let operation = Task { await w.completeExport(snapshot, options: .init()) }
+        #expect(await operation.value == false)
+        #expect(capture.outputs.isEmpty && w.error == nil && !FileManager.default.fileExists(atPath: capture.destination!.path))
+    }
+
+    @Test func ordinarySaveAndSaveCopyRetainAnUnchangedActiveExportBinding() async throws {
+        let root = try root(); defer { try? FileManager.default.removeItem(at: root) }
+        let capture = ExportCapture(), w = Workspace(services: services(capture)); defer { w.shutdown() }
+        let active = root.appendingPathComponent("active.roughscore")
+        #expect(w.saveAs(to: active))
+        w.beginExport(.tab); let snapshot = try #require(w.exportSnapshot)
+        #expect(w.save(to: active) && w.exportSnapshot?.id == snapshot.id)
+        #expect(w.saveCopy(to: root.appendingPathComponent("copy.roughscore")) && w.exportSnapshot?.id == snapshot.id)
+        #expect(await w.completeExport(snapshot, options: .init(), to: root.appendingPathComponent("score.txt")))
+        #expect(capture.outputs.count == 1 && w.activeProjectURL == active)
     }
 
     @Test func protectedInputsPackageAliasesInvalidRangeAndDragAreRejected() async throws {

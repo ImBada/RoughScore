@@ -193,6 +193,15 @@ Interactive edits during that GUI check are recorded separately, so that run is
 not evidence of unchanged project/session state. The modal cancellation guard
 added afterward is covered by an explicit regression and the final local CI.
 
+Independent R1 additionally reproduced stale protection after reentrant Save As
+and Task cancellation during destination selection. Successful Save As now
+invalidates the export snapshot; ordinary active save and Save Copy retain it.
+The final write checks current as well as captured protected paths/package roots
+and checks Task cancellation after the modal. The original independent probes
+are preserved unchanged under `Tests/ReviewProbes` and pass after these fixes;
+the normal suite covers package readability, collected-media bytes and silent
+Task cancellation too. These parent results do not substitute for a new review.
+
 Exact-commit independent review and inherited PR40 approval remain separate gates.
 GitHub workflows stay disabled as instructed. Local current-SDK success is not
 macOS15 runtime validation, signing/notarization or model/audio quality approval.

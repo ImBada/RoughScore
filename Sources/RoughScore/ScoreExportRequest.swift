@@ -71,10 +71,11 @@ struct ScoreExportSnapshot: Identifiable, Sendable {
         case .pdf, .print: return try ScorePDFExporter.data(for: plan(options))
         }
     }
-    func validateDestination(_ url: URL, format: ScoreExportFormat) throws {
+    func validateDestination(_ url: URL, format: ScoreExportFormat,
+                             additionalProtectedFiles: [URL] = [], additionalPackageRoot: URL? = nil) throws {
         guard url.isFileURL, url.pathExtension.lowercased() == format.fileExtension else { throw ScoreExportError.invalidSettings }
         let destination = url.resolvingSymlinksInPath().standardizedFileURL
-        for file in protectedFiles {
+        for file in protectedFiles + additionalProtectedFiles {
             if destination.path == file.resolvingSymlinksInPath().standardizedFileURL.path { throw CocoaError(.fileWriteFileExists) }
             if let a = try? FileManager.default.attributesOfItem(atPath: destination.path),
                let b = try? FileManager.default.attributesOfItem(atPath: file.path),
@@ -83,5 +84,6 @@ struct ScoreExportSnapshot: Identifiable, Sendable {
                aDevice == bDevice, aNode == bNode { throw CocoaError(.fileWriteFileExists) }
         }
         if let packageRoot { try PortableProjectPackage.validateDestination(url, outside: packageRoot) }
+        if let additionalPackageRoot { try PortableProjectPackage.validateDestination(url, outside: additionalPackageRoot) }
     }
 }
