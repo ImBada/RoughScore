@@ -12,6 +12,7 @@ public enum ScorePDFExporter {
         guard let context = CGContext(consumer: consumer, mediaBox: &box, nil) else { throw ScoreExportError.renderingFailed }
         let height = plan.settings.paper.height, margin = plan.settings.margin
         for page in plan.pages {
+            try Task.checkCancellation()
             context.beginPDFPage(nil)
             context.setFillColor(CGColor(gray: 1, alpha: 1)); context.fill(box)
             context.setFillColor(CGColor(gray: 0.13, alpha: 1))
@@ -20,6 +21,9 @@ public enum ScorePDFExporter {
             for line in plan.tuningLines { draw(line, x: margin, top: y, size: 8, context: context, pageHeight: height); y += 11 }
             draw("Original seconds [\(plan.range.start), \(plan.range.end)) - \(plan.lanes.map(\.rawValue).joined(separator: "/"))", x: margin, top: y + 2, size: 8, context: context, pageHeight: height)
             draw("? unknown fret; ~ tentative; blank/dashes untranscribed, never rests. #N identifies each separate note.", x: margin, top: y + 14, size: 8, context: context, pageHeight: height)
+            for (index, line) in plan.analysisLines.enumerated() {
+                draw(line, x: margin, top: y + 27 + Double(index) * 11, size: 8, context: context, pageHeight: height)
+            }
             for element in page.elements {
                 switch element {
                 case .text(let block):
@@ -29,6 +33,8 @@ public enum ScorePDFExporter {
                     }
                 case .system(let system):
                     drawSystem(system, plan: plan, context: context)
+                case .waveform(let wave):
+                    drawWaveform(wave, plan: plan, context: context)
                 }
             }
             draw("RoughScore sparse annotations - page \(page.number) / \(plan.pages.count)", x: margin,
@@ -39,6 +45,26 @@ public enum ScorePDFExporter {
         context.closePDF()
         guard output.length > 0, output.length <= 67_108_864 else { throw ScoreExportError.limitExceeded }
         return output as Data
+    }
+
+    private static func drawWaveform(_ wave: ScoreRenderPlan.Waveform, plan: ScoreRenderPlan, context: CGContext) {
+        let margin = plan.settings.margin, width = plan.settings.paper.width - margin * 2
+        let height = plan.settings.paper.height, center = height - wave.top - 39
+        draw("\(wave.label) audio \(wave.lane == .left ? "L" : "R") overview - original-second axis", x: margin,
+             top: wave.top, size: 8, context: context, pageHeight: height)
+        context.setStrokeColor(CGColor(gray: 0.7, alpha: 1)); context.setLineWidth(0.4)
+        context.move(to: CGPoint(x: margin, y: center)); context.addLine(to: CGPoint(x: margin + width, y: center)); context.strokePath()
+        context.setStrokeColor(CGColor(gray: 0.3, alpha: 1)); context.setLineWidth(0.7)
+        for (index, peak) in wave.peaks.enumerated() {
+            let x = margin + width * (Double(index) + 0.5) / Double(wave.peaks.count)
+            context.move(to: CGPoint(x: x, y: center - Double(peak) * 19))
+            context.addLine(to: CGPoint(x: x, y: center + Double(peak) * 19))
+        }
+        context.strokePath()
+        draw("\(plan.range.start)s", x: margin, top: wave.top + 61, size: 8, context: context, pageHeight: height)
+        let end = line("\(plan.range.end)s", size: 8)
+        let endWidth = CTLineGetTypographicBounds(end, nil, nil, nil)
+        draw("\(plan.range.end)s", x: margin + width - endWidth, top: wave.top + 61, size: 8, context: context, pageHeight: height)
     }
 
     /// Writes atomically only after complete successful rendering. The caller owns

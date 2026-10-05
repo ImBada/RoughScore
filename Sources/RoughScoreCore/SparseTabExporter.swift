@@ -19,6 +19,27 @@ public enum SparseTabExporter {
         }
     }
 
+    /// Explicit immutable analysis source. Original seconds and note lanes stay unchanged.
+    public struct AnalysisContext: Sendable {
+        public let label: String
+        public let bars: [GuitarLane: [Double]]
+        public init(project: ScoreProject, asset: AudioAsset? = nil) {
+            let asset = asset ?? project.originalAsset
+            label = asset?.role == .importedGuitarStem ? "Imported Stem" : "Original"
+            var result: [GuitarLane: [Double]] = [:]
+            for lane in GuitarLane.allCases {
+                let channel: ListeningSource = lane == .left ? .left : .right
+                let summary = project.analyses[project.analysisKey(asset: asset, channel: channel)] ??
+                    project.analyses[project.analysisKey(asset: asset, channel: .stereo)]
+                result[lane] = Array(Set((summary?.bars ?? []).filter { $0.isFinite && $0 >= 0 && $0 <= project.duration })).sorted()
+            }
+            bars = result
+        }
+        public var caption: String {
+            bars.values.allSatisfy(\.isEmpty) ? "\(label): no stored bar analysis; original-second anchors" : "\(label): stored analysis bars and original-second anchors"
+        }
+    }
+
     public struct EventTable: Codable, Equatable, Sendable {
         public let title: String
         public let duration: Double
@@ -118,12 +139,13 @@ public enum SparseTabExporter {
     /// Every note receives its own column, including simultaneous/same-string notes.
     /// Dashes are untranscribed space, never an inferred rest or rhythmic duration.
     public static func tab(_ project: ScoreProject, selection: Selection = Selection(), columnsPerSystem: Int = 6,
-                           showRhythm: Bool = true) throws -> String {
+                           showRhythm: Bool = true, analysis: AnalysisContext? = nil) throws -> String {
         guard (1...16).contains(columnsPerSystem) else { throw ScoreExportError.invalidSettings }
         let table = try snapshot(project, selection: selection)
         var lines = ["RoughScore sparse TAB", try quoted(table.title), try tuningHeader(for: project),
                      "Original seconds [\(table.range.start), \(table.range.end)); ?=unknown fret; ~=tentative; -=untranscribed, not rest.",
-                     "Each #N is a separate annotation column; equal time labels do not merge notes."]
+                     "Each #N is a separate annotation column; equal time labels do not merge notes.",
+                     (analysis ?? AnalysisContext(project: project)).caption]
         if table.events.isEmpty { lines.append("No annotations in this selection (untranscribed).") }
         for first in stride(from: 0, to: table.events.count, by: columnsPerSystem) {
             let indices = Array(first..<min(table.events.count, first + columnsPerSystem))
@@ -144,7 +166,7 @@ public enum SparseTabExporter {
             for i in indices {
                 let e = table.events[i]
                 let rhythm = showRhythm ? " length=\(e.length?.rawValue ?? "null")" : ""
-                lines.append("#\(i + 1) id=\(e.id.uuidString) time=\(e.time) lane=\(e.lane.rawValue) string=\(e.string) fret=\(e.fret.map(String.init) ?? "null")\(rhythm) tentative=\(e.tentative)\(barAnchor(e, project: project)) memo=\(try quoted(e.memo))")
+                lines.append("#\(i + 1) id=\(e.id.uuidString) time=\(e.time) lane=\(e.lane.rawValue) string=\(e.string) fret=\(e.fret.map(String.init) ?? "null")\(rhythm) tentative=\(e.tentative)\(barAnchor(e, project: project, analysis: analysis)) memo=\(try quoted(e.memo))")
             }
         }
         let text = lines.joined(separator: "\n") + "\n"
@@ -152,8 +174,8 @@ public enum SparseTabExporter {
         return text
     }
 
-    static func barAnchor(_ event: TabEvent, project: ScoreProject) -> String {
-        let bars = Array(Set((project.analyses[event.lane.rawValue] ?? project.analyses["stereo"])?.bars ?? [])).sorted()
+    static func barAnchor(_ event: TabEvent, project: ScoreProject, analysis: AnalysisContext? = nil) -> String {
+        let bars = (analysis ?? AnalysisContext(project: project)).bars[event.lane] ?? []
         guard let index = bars.lastIndex(where: { $0 <= event.time }) else { return "" }
         return " analysis-bar=\(index + 1)@\(bars[index])s"
     }

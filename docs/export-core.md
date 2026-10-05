@@ -3,9 +3,17 @@
 This core produces actual six-string sparse TAB, a lossless versioned event table,
 and static paginated A4/Letter PDF documents. It reads model values only: no audio,
 user library, window/view snapshot, transport controls or editor state participates.
-It does not complete #15's menu/export/print UI integration or waveform output;
-those remain with the source owner after #7/#8/#9 integration. No rests, missing
-notes, lengths, pitches, meter or tuning octaves are invented.
+The app integration now presents independent range/lane/format/paper options,
+native PDFKit preview/printing, and optional prepared L/R waveform overviews.
+No rests, missing notes, lengths, pitches, meter or tuning octaves are invented.
+
+`SparseTabExporter.AnalysisContext` explicitly selects the original or imported
+Stem's stored bar keys. `ScoreRenderPlan.WaveformInput` copies already prepared,
+original-time-aligned envelopes; waveform elements use their own time axis rather
+than the score's ordinal annotation columns. Offline exports omit waveforms.
+Print settings are copied from NSPrintInfo; project/session/editor state remains
+independent. The historical prerequisite evidence below is not approval of this
+new integration. GitHub CI remains disabled by the user's current instruction.
 
 ## Interface
 
@@ -160,3 +168,31 @@ build passed;33 evaluator and7 CI-helper Python tests passed. Only the five new
 reserved core/test/doc files changed. The three final generated PDFs and latest
 page-image QA are recorded in the task report with hashes; they are examples,
 not a shipped fixture or new product/media library.
+
+
+## App integration validation (issue15)
+
+The File menu and toolbar now share sparse TAB, escaped event table and native
+PDF export settings. Command-P routes the same immutable document snapshot to
+PDFKit's native print panel. Full/selected/custom original-second ranges, L/R,
+A4/Letter, margin, recorded rhythm and optional prepared waveform overview are
+sheet-local values. Rendering runs off the main actor; cancelled or stale requests
+cannot publish after generation or a destination modal. Export does not initiate
+analysis/audio preparation or modify project/session/history values.
+
+New regressions exercise all request formats, exact boundary selection and memo
+round-trip, document bytes and session/write counters, cancelled destinations,
+failed output writes, native menu dispatch, copied print settings, active Stem
+analysis and aligned waveform ranges. Three-minute 720-note full/selected PDFs
+on both paper sizes retain every selected UUID once. Their first/middle/last
+pages were rendered with official Poppler and all twelve samples visually checked
+for Korean text, fret/string/details and header/footer clipping. The native app
+was separately checked with generated task-owned audio/project data for PDF
+preview/save, TSV save and native print cancellation; no physical print job ran.
+Interactive edits during that GUI check are recorded separately, so that run is
+not evidence of unchanged project/session state. The modal cancellation guard
+added afterward is covered by an explicit regression and the final local CI.
+
+Exact-commit independent review and inherited PR40 approval remain separate gates.
+GitHub workflows stay disabled as instructed. Local current-SDK success is not
+macOS15 runtime validation, signing/notarization or model/audio quality approval.
