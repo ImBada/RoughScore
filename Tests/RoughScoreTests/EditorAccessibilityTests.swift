@@ -116,6 +116,20 @@ struct EditorAccessibilityTests {
         #expect(workspace.project.events.count == original.events.count + 2)
         #expect(workspace.project.events.suffix(2).map(\.fret) == [nil, 12])
         #expect(workspace.project.events.suffix(2).allSatisfy { $0.length == nil })
+        // Mutation locks leave display/navigation usable; a disabled cursor/tuning field is not an escape destination.
+        workspace.beginPositionDrag(try #require(workspace.selected)); host.settle()
+        let duringDrag = workspace.project
+        #expect(!controls.cursorField.isEnabled && !controls.tuning.isEnabled && !controls.notes.isEnabled)
+        try send(host, "\t", code: 48, flags: .control)
+        #expect(host.window.firstResponder === controls.input && workspace.project == duringDrag)
+        workspace.requestKeyboardFocus?()
+        try send(host, "\t", code: 48, flags: [.control, .shift])
+        #expect(host.window.firstResponder === controls.settings && workspace.project == duringDrag)
+        workspace.cancelPositionDrag(); host.settle()
+        workspace.shutdown()
+        let closedResponder = host.window.firstResponder
+        #expect(workspace.requestControlFocus?(false) == false)
+        workspace.requestKeyboardFocus?(); #expect(host.window.firstResponder === closedResponder)
     }
 
     @Test func nativeCursorFieldTypingIMEClipboardCaretAndNoteUndoBoundary() throws {

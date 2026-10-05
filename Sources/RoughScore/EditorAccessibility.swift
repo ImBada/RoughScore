@@ -95,7 +95,7 @@ final class EditorNavigationView: NSView, NSTextFieldDelegate {
     private var cursorSnapshot = 0.0
     private var controls: [NSControl] { [cursorField, input, notes, settings, intervalField, tuning] }
     private var live: Workspace? {
-        guard let workspace, workspace.editorIdentity == identity, workspace.controlFocusOwner == owner else { return nil }
+        guard let workspace, workspace.canEdit, workspace.editorIdentity == identity, workspace.controlFocusOwner == owner else { return nil }
         return workspace
     }
     override var isFlipped: Bool { true }
@@ -135,9 +135,13 @@ final class EditorNavigationView: NSView, NSTextFieldDelegate {
         workspace.controlFocusOwner = owner
         let identity = workspace.editorIdentity
         workspace.requestControlFocus = { [weak self, weak workspace] backwards in
-            guard let self, let workspace, workspace.editorIdentity == identity,
+            guard let self, let workspace, workspace.canEdit, workspace.editorIdentity == identity,
                   workspace.controlFocusOwner == self.owner, let window = self.window else { return false }
-            return window.makeFirstResponder(backwards ? self.tuning : self.cursorField)
+            let destinations = backwards ? Array(self.controls.reversed()) : self.controls
+            for control in destinations where control.isEnabled {
+                if window.makeFirstResponder(control) { return true }
+            }
+            return false
         }
         if cursorField.currentEditor() == nil {
             cursorSnapshot = workspace.cursor; displayedCursor = String(format: "%.6f", cursorSnapshot)
@@ -149,7 +153,7 @@ final class EditorNavigationView: NSView, NSTextFieldDelegate {
         }
         for control in controls { control.isEnabled = workspace.canEdit }
         cursorField.isEnabled = workspace.canMutateNotes; intervalField.isEnabled = workspace.canMutateNotes
-        tuning.isEnabled = workspace.canMutateNotes
+        tuning.isEnabled = workspace.canMutateNotes; notes.isEnabled = workspace.canMutateNotes
         let menu = NSMenu()
         menu.addItem(withTitle: "표시 설정", action: nil, keyEquivalent: "")
         for (index, title, enabled, checked) in [
