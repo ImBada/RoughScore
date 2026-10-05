@@ -40,7 +40,7 @@ extension AudioPlayerTransport {
 extension AVAudioPlayer: AudioPlayerTransport {}
 
 struct PreparedAudio: Sendable {
-    let original: URL
+    var original: URL
     let left: URL
     let right: URL
     let directory: URL

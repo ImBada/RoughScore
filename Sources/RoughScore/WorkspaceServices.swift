@@ -21,14 +21,24 @@ struct WorkspaceServices: Sendable {
     var prepareTransport: @MainActor @Sendable (PreparedAudio) throws -> Void = { _ in }
     var discardPreparedTransport: @MainActor @Sendable (PreparedAudio) -> Void = { _ in }
     var writeProject: @MainActor @Sendable (Data, URL) throws -> Void = { try $0.write(to: $1, options: .atomic) }
-    var chooseSaveDestination: @MainActor @Sendable (String) -> URL? = { title in
-        let panel = NSSavePanel()
-        panel.nameFieldStringValue = title
-        panel.allowedContentTypes = [UTType(filenameExtension: "roughscore") ?? .json]
-        return panel.runModal() == .OK ? panel.url : nil
+    var readPackage: @Sendable (URL) async throws -> PortableProjectPackage.Snapshot = { url in
+        let task = Task.detached(priority: .userInitiated) { try PortableProjectPackage.read(at: url) }
+        return try await withTaskCancellationHandler { try await task.value } onCancel: { task.cancel() }
     }
+    var collectPackage: @MainActor @Sendable (ScoreProject, URL, URL?, () throws -> Void) throws -> PortableProjectPackage.Snapshot = {
+        try PortableProjectPackage.collect($0, to: $1, sourceRoot: $2, cancellation: $3, verifyingExpectedIdentities: true)
+    }
+    var updatePackage: @MainActor @Sendable (ScoreProject, PortableProjectPackage.Snapshot, () throws -> Void) throws -> PortableProjectPackage.Snapshot = {
+        try PortableProjectPackage.update($0, replacing: $1, cancellation: $2)
+    }
+    var chooseSaveDestination: @MainActor @Sendable (ProjectSaveRequest) -> URL? = { $0.choose() }
     var nativeTextUndo: @MainActor @Sendable () -> NativeTextUndoTarget? = { NativeTextUndoTarget.active() }
     var fileExists: @Sendable (URL) -> Bool
+    var initialProject: @MainActor @Sendable () -> URL? = {
+        CommandLine.arguments.dropFirst().first(where: {
+            ["roughscore", PortableProjectPackage.fileExtension].contains(URL(fileURLWithPath: $0).pathExtension)
+        }).map { URL(fileURLWithPath: $0) }
+    }
     var lastProject: @MainActor @Sendable () -> URL?
     var rememberProject: @MainActor @Sendable (URL) -> Void
 

@@ -153,6 +153,12 @@ final class Workspace: ObservableObject {
     private var savedProject: ScoreProject?
     private var autosaveTask: Task<Void, Never>?
     private var projectURL: URL?
+    private var currentPackage: PortableProjectPackage.Snapshot?
+    private var saveOperation: UUID?
+    var activeProjectURL: URL? { projectURL }
+    var currentPackageURL: URL? { currentPackage == nil ? nil : projectURL }
+    var canSave: Bool { canEdit && saveOperation == nil }
+
     private var projectRevision: UInt64 = 0
     private var player: (any AudioPlayerTransport)?
     private struct PreparedPlayer {
@@ -198,6 +204,7 @@ final class Workspace: ObservableObject {
         var project: ScoreProject
         var audio: PreparedAudio?
         var projectURL: URL?
+        var package: PortableProjectPackage.Snapshot?
         var demoURL: URL?
         var isDemo = false
         var fromDisk = false
@@ -1277,8 +1284,9 @@ final class Workspace: ObservableObject {
             guard let self, !Task.isCancelled, !self.closed,
                   self.projectIdentity == identity, self.projectRevision == revision,
                   self.projectURL == url, self.dirty else { return }
+            self.autosaveTask = nil
             // A load pauses saving; its completion/cancellation always resumes the retained revision.
-            guard self.canEdit else { return }
+            guard self.canSave else { return }
             _ = self.save(to: url)
         }
     }
@@ -1414,9 +1422,8 @@ final class Workspace: ObservableObject {
     }
 
     private func prepareStem(_ path: String, asset: AudioAsset, duration: Double, requireIdentity: Bool,
-                             operation: LoadOperation) async throws -> (audio: PreparedAudio, asset: AudioAsset) {
-        guard asset.reference.kind == .external else { throw ProjectError.invalidData }
-        let url = URL(fileURLWithPath: path)
+                             operation: LoadOperation, package: PortableProjectPackage.Snapshot? = nil) async throws -> (audio: PreparedAudio, asset: AudioAsset) {
+        let url = try assetURL(asset, package: package)
         let scoped = url.startAccessingSecurityScopedResource()
         defer { if scoped { url.stopAccessingSecurityScopedResource() } }
         let raw = try await services.prepare(url) { [weak self] progress in
@@ -1426,10 +1433,15 @@ final class Workspace: ObservableObject {
         try requireCurrent(operation)
         guard let identity = raw.identity else { throw AudioIssue.unsupported }
         if requireIdentity, identity != asset.identity { throw AudioIssue.sourceChanged }
-        var candidate = asset; candidate.identity = identity; candidate.reference = AudioReference(path: path)
+        if asset.reference.kind == .contained { _ = try package?.resolve(assetID: asset.id) }
+        var candidate = asset; candidate.identity = identity
         let aligned = try await services.align(raw, candidate, duration)
-        do { try requireCurrent(operation) }
-        catch { aligned.resource.disposeScratch(); throw error }
+        do {
+            try requireCurrent(operation)
+            guard try await AudioPreparation.fingerprint(url) == identity.sha256 else { throw AudioIssue.sourceChanged }
+            if asset.reference.kind == .contained { _ = try package?.resolve(assetID: asset.id) }
+            try requireCurrent(operation)
+        } catch { aligned.resource.disposeScratch(); throw error }
         return (aligned, candidate)
     }
 
@@ -1462,10 +1474,17 @@ final class Workspace: ObservableObject {
     /// Attach/relink/offset prepare a separate muted graph before committing any document state.
     @discardableResult
     func attachStem(at url: URL, offset: Double = 0) -> Task<Bool, Never>? {
+        attachStem(at: url, offset: offset, preserving: nil)
+    }
+
+    private func attachStem(at url: URL, offset: Double, preserving existing: AudioAsset?) -> Task<Bool, Never>? {
         guard canLoad, project.originalAsset != nil, offset.isFinite, abs(offset) <= 86_400,
               let operation = reserveLoad() else { return nil }
-        let asset = AudioAsset(id: project.stemAsset?.id ?? UUID(), role: .importedGuitarStem,
+        var asset = existing ?? AudioAsset(id: project.stemAsset?.id ?? UUID(), role: .importedGuitarStem,
             reference: AudioReference(path: url.path), originalTimeOffset: offset)
+        asset.originalTimeOffset = offset
+        let inputAsset = asset
+        let package = currentPackage
         let task = Task { () -> Bool in
             var audio: PreparedAudio?, group: [ListeningSource: PreparedPlayer] = [:], committed = false
             defer {
@@ -1478,8 +1497,8 @@ final class Workspace: ObservableObject {
                 }
             }
             do {
-                let staged = try await prepareStem(url.path, asset: asset, duration: project.duration,
-                    requireIdentity: false, operation: operation)
+                let staged = try await prepareStem(url.path, asset: inputAsset, duration: project.duration,
+                    requireIdentity: existing != nil, operation: operation, package: package)
                 audio = staged.audio
                 let candidate = try operation.snapshot.attachingStem(staged.asset)
                 group = try prepareGroup(staged.audio)
@@ -1524,8 +1543,9 @@ final class Workspace: ObservableObject {
 
     @discardableResult
     func setStemOffset(_ offset: Double) -> Task<Bool, Never>? {
-        guard let asset = project.stemAsset, asset.reference.kind == .external else { return nil }
-        return attachStem(at: URL(fileURLWithPath: asset.reference.path), offset: offset)
+        guard let asset = project.stemAsset else { return nil }
+        do { return attachStem(at: try assetURL(asset, package: currentPackage), offset: offset, preserving: asset) }
+        catch { self.error = error.localizedDescription; return nil }
     }
 
     /// Separate asset graphs share the production streaming Engine implementation. Each handover
@@ -1650,7 +1670,7 @@ final class Workspace: ObservableObject {
     }
 
     private func reserveLoad() -> LoadOperation? {
-        guard !closed, !analyzing, loadOperation == nil, !busy || startupPending else { return nil }
+        guard !closed, !analyzing, saveOperation == nil, loadOperation == nil, !busy || startupPending else { return nil }
         cancelPositionDrag(); endMemoEditing()
         clearPitchDetection()
         let operation = LoadOperation(projectID: projectIdentity, snapshot: project)
@@ -1688,7 +1708,14 @@ final class Workspace: ObservableObject {
         loadProgress = max(loadProgress, min(1, max(0, value)))
     }
 
-    private func stageAudio(_ url: URL, preserving: ScoreProject?, operation: LoadOperation) async throws -> StagedWorkspace {
+    private func assetURL(_ asset: AudioAsset, package: PortableProjectPackage.Snapshot?) throws -> URL {
+        if asset.reference.kind == .external { return URL(fileURLWithPath: asset.reference.path) }
+        guard let package else { throw PortableProjectPackage.PackageError.mediaUnavailable }
+        return try package.resolve(assetID: asset.id)
+    }
+
+    private func stageAudio(_ url: URL, preserving: ScoreProject?, operation: LoadOperation,
+                            package: PortableProjectPackage.Snapshot? = nil) async throws -> StagedWorkspace {
         let scoped = url.startAccessingSecurityScopedResource()
         defer { if scoped { url.stopAccessingSecurityScopedResource() } }
         let audio = try await services.prepare(url) { [weak self] progress in
@@ -1699,30 +1726,48 @@ final class Workspace: ObservableObject {
         try requireCurrent(operation)
         if let preserving, preserving.events.contains(where: { $0.time >= audio.duration }) { throw ProjectError.invalidData }
         let base = preserving ?? ScoreProject(title: url.deletingPathExtension().lastPathComponent, duration: audio.duration)
-        let candidate = try base.relinkingOriginal(path: url.path, identity: audio.identity, duration: audio.duration)
+        var candidate = try base.relinkingOriginal(path: url.path, identity: audio.identity, duration: audio.duration)
+        if let package, let asset = base.originalAsset, asset.reference.kind == .contained {
+            guard audio.identity == asset.identity else { throw AudioIssue.sourceChanged }
+            _ = try package.resolve(assetID: asset.id)
+            candidate.assets?[0].reference = asset.reference
+            candidate.audioPath = nil
+        }
         retained = true
         return StagedWorkspace(project: candidate, audio: audio,
-            projectURL: preserving == nil ? nil : projectURL, baseline: preserving == nil ? nil : savedProject,
+            projectURL: preserving == nil ? nil : projectURL, package: package ?? (preserving == nil ? nil : currentPackage),
+            baseline: preserving == nil ? nil : savedProject,
             status: audio.isMono ? "모노 파일 · L/R에는 같은 소리가 들어 있습니다" : "스테레오 준비 완료 · 채널별로 듣고 필요한 음을 남기세요")
     }
 
     private func stageProject(_ url: URL, operation: LoadOperation) async throws -> StagedWorkspace {
-        let loaded = try await services.readProject(url).validated()
+        let package = url.pathExtension == PortableProjectPackage.fileExtension ? try await services.readPackage(url) : nil
+        let loaded: ScoreProject
+        if let package { loaded = package.project }
+        else {
+            loaded = try await services.readProject(url).validated()
+            guard loaded.assets?.contains(where: { $0.reference.kind == .contained }) != true else {
+                throw PortableProjectPackage.PackageError.mediaUnavailable
+            }
+        }
         try requireCurrent(operation)
+        let originalURL = try loaded.originalAsset.map { try assetURL($0, package: package) }
+            ?? loaded.audioPath.map { URL(fileURLWithPath: $0) }
         var staged: StagedWorkspace
-        if let path = loaded.audioPath, services.fileExists(URL(fileURLWithPath: path)) {
+        if let originalURL, services.fileExists(originalURL) {
             do {
-                staged = try await stageAudio(URL(fileURLWithPath: path), preserving: loaded, operation: operation)
+                staged = try await stageAudio(originalURL, preserving: loaded, operation: operation, package: package)
             } catch {
                 try requireCurrent(operation)
-                let fingerprint = try? await AudioPreparation.fingerprint(URL(fileURLWithPath: path))
+                let fingerprint = try? await AudioPreparation.fingerprint(originalURL)
                 try requireCurrent(operation)
                 staged = StagedWorkspace(project: loaded.invalidatingUnverifiedAnalysis(fingerprint: fingerprint), status: "오디오를 열지 못했습니다 · TAB은 오프라인으로 편집할 수 있습니다",
                     offlineReason: error.localizedDescription)
             }
         } else {
-            staged = StagedWorkspace(project: loaded.invalidatingUnverifiedAnalysis(fingerprint: nil), status: "오디오 경로를 찾을 수 없습니다 · TAB은 오프라인으로 편집할 수 있습니다",
-                offlineReason: "연결된 오디오를 찾을 수 없습니다")
+            staged = StagedWorkspace(project: loaded.invalidatingUnverifiedAnalysis(fingerprint: nil),
+                status: originalURL == nil ? "오디오 없는 TAB 프로젝트 · 편집 가능" : "오디오 경로를 찾을 수 없습니다 · TAB은 오프라인으로 편집할 수 있습니다",
+                offlineReason: originalURL == nil ? nil : "연결된 오디오를 찾을 수 없습니다")
         }
         var retained = false
         defer {
@@ -1735,7 +1780,7 @@ final class Workspace: ObservableObject {
         if let asset = loaded.stemAsset {
             do {
                 staged.stemAudio = try await prepareStem(asset.reference.path, asset: asset, duration: staged.project.duration,
-                    requireIdentity: true, operation: operation).audio
+                    requireIdentity: true, operation: operation, package: package).audio
             } catch {
                 try requireCurrent(operation)
                 staged.stemReason = "스템 연결 실패 · 원곡/TAB 유지 · 다시 연결: " + error.localizedDescription
@@ -1743,7 +1788,7 @@ final class Workspace: ObservableObject {
                 try requireCurrent(operation)
             }
         }
-        staged.projectURL = url; staged.fromDisk = true; staged.baseline = loaded
+        staged.projectURL = url; staged.package = package; staged.fromDisk = true; staged.baseline = loaded
         retained = true
         return staged
     }
@@ -1765,7 +1810,9 @@ final class Workspace: ObservableObject {
     /// Missing/unreadable media cannot disprove prior provenance. Readable changed bytes can.
     private func invalidatingContradictedStem(in project: ScoreProject, asset: AudioAsset,
                                              operation: LoadOperation) async throws -> ScoreProject {
-        let fingerprint = try? await AudioPreparation.fingerprint(URL(fileURLWithPath: asset.reference.path))
+        let fingerprint: String?
+        if let url = try? assetURL(asset, package: currentPackage) { fingerprint = try? await AudioPreparation.fingerprint(url) }
+        else { fingerprint = nil }
         try requireCurrent(operation)
         guard let fingerprint, fingerprint != asset.identity?.sha256 else { return project }
         var candidate = project
@@ -1799,7 +1846,7 @@ final class Workspace: ObservableObject {
             try requireCurrent(operation)
             switch request {
             case .startup:
-                if let url = services.lastProject(), services.fileExists(url) {
+                if let url = services.initialProject() ?? services.lastProject(), services.fileExists(url) {
                     do { staged = try await stageProject(url, operation: operation) }
                     catch {
                         try requireCurrent(operation)
@@ -1813,7 +1860,7 @@ final class Workspace: ObservableObject {
                     do {
                         let stemDuration = staged?.project.duration ?? project.duration
                         let readyStem = try await prepareStem(asset.reference.path, asset: asset,
-                            duration: stemDuration, requireIdentity: true, operation: operation).audio
+                            duration: stemDuration, requireIdentity: true, operation: operation, package: currentPackage).audio
                         staged?.stemAudio = readyStem
                     } catch {
                         try requireCurrent(operation)
@@ -1872,6 +1919,7 @@ final class Workspace: ObservableObject {
                     candidate.stemAudio = nil; candidate.stemReason = "스템 재생 준비 실패 · 다시 연결: " + error.localizedDescription
                 }
             }
+            try candidate.package?.validate()
             try requireCurrent(operation)
             activate(candidate, player: stagedPlayer)
             stemAudio = candidate.stemAudio; inactivePlayers = stemPlayers
@@ -1907,7 +1955,7 @@ final class Workspace: ObservableObject {
         prepared = staged.audio; originalAudio = staged.audio; assetRole = .original; project = staged.project
         audioConnection = staged.offlineReason.map { "오프라인 · " + $0 } ??
             (staged.audio?.isMono == true ? "모노 연결됨 · L/R 동일" : "스테레오 연결됨 · 원본 L/R")
-        projectIdentity = UUID(); projectURL = staged.projectURL; isDemo = staged.isDemo
+        projectIdentity = UUID(); projectURL = staged.projectURL; currentPackage = staged.package; isDemo = staged.isDemo
         resetSelection(); cursor = staged.isDemo ? 2 : 0; windowStart = 0
         positionDrag = nil; positionMagnetTargetID = nil; magnetDragInput = nil
         dragSelection = nil; dragEvents = nil
@@ -1926,60 +1974,168 @@ final class Workspace: ObservableObject {
     }
 
     func save() {
-        // Dirty projects with a location resume autosave when the transition releases its reservation.
-        guard canEdit else { return }
-        let identity = projectIdentity
-        let destination = projectURL ?? services.chooseSaveDestination(project.title)
-        guard !closed, projectIdentity == identity else { return }
-        guard let destination else {
-            if dirty { saveState = .cancelled }
-            return
-        }
-        if save(to: destination) { status = "프로젝트 저장 완료 · 이후 입력은 자동 저장" }
+        guard canSave else { return }
+        if let projectURL {
+            if save(to: projectURL) { status = "프로젝트 저장 완료 · 이후 입력은 자동 저장" }
+        } else { chooseSave(action: .save, format: .linked) }
     }
 
-    /// URL seam shares the same atomic save transaction as the panel and autosave paths.
+    func saveAs(format: ProjectSaveRequest.Format = .linked) { chooseSave(action: .saveAs, format: format) }
+    func saveCopy(format: ProjectSaveRequest.Format = .linked) { chooseSave(action: .saveCopy, format: format) }
+
+    private func chooseSave(action: ProjectSaveRequest.Action, format: ProjectSaveRequest.Format) {
+        guard canSave else { return }
+        let identity = projectIdentity, revision = projectRevision, snapshot = project, token = UUID()
+        saveOperation = token
+        let destination = services.chooseSaveDestination(ProjectSaveRequest(title: project.title, action: action, format: format))
+        guard saveOperation == token else { return }
+        saveOperation = nil
+        defer { if !closed, dirty, autosaveTask == nil { scheduleAutosave() } }
+        guard !closed, projectIdentity == identity, projectRevision == revision, project == snapshot else { return }
+        guard let destination else {
+            if action != .saveCopy, dirty { saveState = .cancelled }
+            return
+        }
+        _ = writeSave(to: destination, format: format, copy: action == .saveCopy, replaceActive: false)
+    }
+
+    /// Ordinary save/autosave retain their active-destination semantics. A different URL is Save As.
     @discardableResult
     func save(to destination: URL) -> Bool {
-        guard canEdit else { return false }
-        autosaveTask?.cancel(); autosaveTask = nil
-        let identity = projectIdentity, revision = projectRevision
-        let snapshot = project
-        var copiedAudio: URL?
-        saveState = .saving
-        do {
-            var saved = try snapshot.validated()
-            if isDemo, let audio = originalAudio, saved.audioPath == demoURL?.path {
-                let copy = destination.deletingLastPathComponent().appendingPathComponent("RoughScore-demo-" + UUID().uuidString + ".wav")
-                try FileManager.default.copyItem(at: audio.original, to: copy)
-                copiedAudio = copy; saved.audioPath = copy.path
-                if let index = saved.assets?.firstIndex(where: { $0.role == .original }) {
-                    saved.assets?[index].reference = AudioReference(path: copy.path)
-                }
+        let format: ProjectSaveRequest.Format = destination.pathExtension == PortableProjectPackage.fileExtension ? .collected : .linked
+        return writeSave(to: destination, format: format, copy: false, replaceActive: destination.standardizedFileURL == projectURL?.standardizedFileURL)
+    }
+    @discardableResult
+    func saveAs(to destination: URL, format: ProjectSaveRequest.Format = .linked) -> Bool {
+        writeSave(to: destination, format: format, copy: false, replaceActive: false)
+    }
+    @discardableResult
+    func saveCopy(to destination: URL, format: ProjectSaveRequest.Format = .linked) -> Bool {
+        writeSave(to: destination, format: format, copy: true, replaceActive: false)
+    }
+
+    private func writeSave(to destination: URL, format: ProjectSaveRequest.Format, copy: Bool, replaceActive: Bool) -> Bool {
+        guard canSave else { return false }
+        let token = UUID(), identity = projectIdentity, revision = projectRevision, snapshot = project
+        saveOperation = token
+        if !copy { autosaveTask?.cancel(); autosaveTask = nil; saveState = .saving }
+        defer {
+            if saveOperation == token {
+                saveOperation = nil
+                if !closed, dirty, autosaveTask == nil { scheduleAutosave() }
             }
-            let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-            try services.writeProject(encoder.encode(saved), destination)
-            guard !closed, projectIdentity == identity else { return false }
-            // Reentrant injected services cannot make a newer revision falsely clean.
-            if projectRevision == revision, project == snapshot { project = saved }
-            savedProject = saved; projectURL = destination
+        }
+        var copiedAudio: URL?
+        let requireSave = {
+            guard !self.closed, self.saveOperation == token, self.projectIdentity == identity,
+                  self.projectRevision == revision, self.project == snapshot else { throw CancellationError() }
+        }
+        do {
+            guard destination.pathExtension == format.fileExtension else { throw CocoaError(.fileWriteInvalidFileName) }
+            var saved = try snapshot.validated()
+            let package: PortableProjectPackage.Snapshot?
+            if format == .collected {
+                if replaceActive {
+                    guard let currentPackage else { throw PortableProjectPackage.PackageError.invalidDestination }
+                    package = try services.updatePackage(saved, currentPackage, requireSave)
+                } else {
+                    package = try services.collectPackage(saved, destination, currentPackage?.root, requireSave)
+                }
+                saved = package!.project
+            } else {
+                package = nil
+                // A linked export is explicit external URLs, never orphaned relative references.
+                for index in (saved.assets ?? []).indices {
+                    if let asset = saved.assets?[index], asset.reference.kind == .contained {
+                        let url = try assetURL(asset, package: currentPackage)
+                        saved.assets?[index].reference = AudioReference(path: url.path)
+                        if asset.role == .original { saved.audioPath = url.path }
+                    }
+                }
+                if !replaceActive, services.fileExists(destination) { throw CocoaError(.fileWriteFileExists) }
+                if isDemo, let audio = originalAudio, saved.audioPath == demoURL?.path {
+                    let resource = destination.deletingLastPathComponent().appendingPathComponent("RoughScore-demo-" + UUID().uuidString + ".wav")
+                    try FileManager.default.copyItem(at: audio.original, to: resource)
+                    copiedAudio = resource
+                    if let identity = audio.identity {
+                        // Verify both ends before publishing any reference to the copied demo.
+                        guard try Data(contentsOf: resource) == Data(contentsOf: audio.original),
+                              saved.originalAsset?.identity == identity else { throw AudioIssue.sourceChanged }
+                    }
+                    saved.audioPath = resource.path
+                    if let index = saved.assets?.firstIndex(where: { $0.role == .original }) {
+                        saved.assets?[index].reference = AudioReference(path: resource.path)
+                    }
+                }
+                _ = try saved.validated()
+                try requireSave()
+                let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+                let bytes = try encoder.encode(saved)
+                if replaceActive, let savedProject {
+                    try LinkedProjectWriter.replace(bytes, at: destination, expected: savedProject,
+                        write: services.writeProject, cancellation: requireSave)
+                }
+                else { try LinkedProjectWriter.create(bytes, at: destination, write: services.writeProject, cancellation: requireSave) }
+            }
+            // Injected synchronous writers may reenter. They cannot advance the old session.
+            try requireSave()
+            if copy {
+                status = "프로젝트 사본 저장 완료 · 현재 저장 위치 유지"
+                return true
+            }
+            project = saved; savedProject = saved; projectURL = destination; currentPackage = package
+            rebasePreparedSources(to: saved, package: package)
             refreshSaveState()
             services.rememberProject(destination)
-            if dirty { scheduleAutosave() }
+            status = "프로젝트 저장 완료 · 이후 입력은 자동 저장"
             return true
         } catch {
             if let copiedAudio { try? FileManager.default.removeItem(at: copiedAudio) }
-            guard !closed, projectIdentity == identity else { return false }
-            dirty = savedProject.map { project != $0 } ?? true
-            saveState = .failed; self.error = error.localizedDescription
+            guard !closed, projectIdentity == identity, saveOperation == token else { return false }
+            if !copy {
+                dirty = savedProject.map { project != $0 } ?? true
+                saveState = error is CancellationError ? .cancelled : .failed
+            }
+            self.error = error.localizedDescription
+            // Retained edits still target the old document after a failed/cancelled Save As.
+            if !copy, dirty { scheduleAutosave() }
             return false
         }
+    }
+
+    /// Change only source locations; cached/scratch leases, graph generations and note history stay owned.
+    private func rebasePreparedSources(to saved: ScoreProject, package: PortableProjectPackage.Snapshot?) {
+        func rebased(_ audio: PreparedAudio?, asset: AudioAsset?) -> PreparedAudio? {
+            guard var audio, let asset, audio.identity == asset.identity else { return audio }
+            let url: URL
+            if asset.reference.kind == .contained, let package { url = package.root.appendingPathComponent(asset.reference.path) }
+            else { url = URL(fileURLWithPath: asset.reference.path) }
+            audio.original = url
+            return audio
+        }
+        originalAudio = rebased(originalAudio, asset: saved.originalAsset)
+        stemAudio = rebased(stemAudio, asset: saved.stemAsset)
+        prepared = assetRole == .original ? originalAudio : stemAudio
+        outgoingAssetAudio = rebased(outgoingAssetAudio, asset: outgoingAssetRole == .original ? saved.originalAsset : saved.stemAsset)
+        func rebaseHistory(_ history: inout [EditSnapshot]) {
+            for index in history.indices {
+                guard var state = history[index].stemState, let asset = saved.stemAsset, state.asset.identity == asset.identity else { continue }
+                var historyAsset = state.asset; historyAsset.reference = asset.reference
+                state = StemState(asset: historyAsset, analyses: state.analyses,
+                    audio: rebased(state.audio, asset: asset)!, players: state.players)
+                history[index].stemState = state
+            }
+        }
+        rebaseHistory(&undoHistory); rebaseHistory(&redoHistory)
     }
 
     func openProject() {
         guard canLoad, confirmDiscard(), let operation = reserveLoad() else { return }
         let panel = NSOpenPanel()
-        panel.allowedContentTypes = [UTType(filenameExtension: "roughscore") ?? .json]
+        panel.allowedContentTypes = [ProjectSaveRequest.Format.linked.contentType, ProjectSaveRequest.Format.collected.contentType]
+        panel.canChooseDirectories = true
+        panel.treatsFilePackagesAsDirectories = false
+        panel.message = "링크 프로젝트(.roughscore) 또는 오디오 포함 프로젝트(.roughscorepkg)를 엽니다."
         guard panel.runModal() == .OK, let url = panel.url else {
             if loadOperation?.id == operation.id { cancelLoading() }
             return

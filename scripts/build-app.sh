@@ -26,6 +26,12 @@ cat > "$app/Contents/Info.plist" <<'PLIST'
 <key>UTTypeConformsTo</key><array><string>public.json</string></array>
 <key>UTTypeTagSpecification</key><dict>
 <key>public.filename-extension</key><array><string>roughscore</string></array>
+</dict></dict><dict>
+<key>UTTypeIdentifier</key><string>com.roughscore.portable-project</string>
+<key>UTTypeDescription</key><string>RoughScore Collected Project</string>
+<key>UTTypeConformsTo</key><array><string>com.apple.package</string></array>
+<key>UTTypeTagSpecification</key><dict>
+<key>public.filename-extension</key><array><string>roughscorepkg</string></array>
 </dict></dict></array>
 </dict></plist>
 PLIST
