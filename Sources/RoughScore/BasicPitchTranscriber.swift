@@ -7,8 +7,9 @@ import RoughScoreCore
 /// spotify/basic-pitch 9991303, v0.4.0; see Resources/BasicPitch). Candidates, not truth.
 /// Pass one channel per call (L and R separately); nothing here downmixes. Run off the UI actor.
 struct BasicPitchTranscriber: Sendable {
-    enum TranscriptionError: Error, Equatable {
+    enum TranscriptionError: LocalizedError, Equatable {
         case invalidSampleRate, invalidTimeOrigin, regionTooLong, nonfiniteSample, modelUnavailable, resamplingFailed
+        var errorDescription: String? { "코드·다성 후보를 만들지 못했습니다. TAB은 바뀌지 않습니다." }
     }
 
     static let modelSampleRate = 22_050.0

@@ -106,6 +106,25 @@ enum AudioPreparation {
         return try await withTaskCancellationHandler { try await task.value } onCancel: { task.cancel() }
     }
 
+    /// One prepared channel's samples for `start..<end` (at most 60 s), read in blocks with
+    /// cancellation checks. `origin` is the original time of the first sample.
+    static func readRegion(_ url: URL, from start: Double, to end: Double) throws -> (samples: [Float], sampleRate: Double, origin: Double) {
+        let file = try AVAudioFile(forReading: url, commonFormat: .pcmFormatFloat32, interleaved: false)
+        let sampleRate = file.processingFormat.sampleRate
+        let first = Int64(floor(start * sampleRate)), last = min(file.length, Int64(ceil(end * sampleRate)))
+        guard first < last, last - first <= Int64(60 * sampleRate) else { throw AudioIssue.unsupported }
+        file.framePosition = first
+        let buffer = AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: 4096)!
+        var samples: [Float] = []; samples.reserveCapacity(Int(last - first))
+        while file.framePosition < last {
+            try Task.checkCancellation()
+            try file.read(into: buffer, frameCount: AVAudioFrameCount(min(4096, last - file.framePosition)))
+            guard buffer.frameLength > 0 else { throw AudioIssue.unsupported }
+            samples.append(contentsOf: UnsafeBufferPointer(start: buffer.floatChannelData![0], count: Int(buffer.frameLength)))
+        }
+        return (samples, sampleRate, Double(first) / sampleRate)
+    }
+
     /// Decode in bounded chunks and preserve each original channel. This is not source separation.
     static func prepare(_ url: URL, progress: @escaping @Sendable (Double) async -> Void = { _ in }) async throws -> PreparedAudio {
         let task = Task.detached(priority: .userInitiated) {

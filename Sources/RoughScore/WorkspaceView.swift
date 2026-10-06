@@ -207,12 +207,19 @@ struct WorkspaceView: View {
                     .font(.system(size: 10)).foregroundStyle(Palette.secondary).lineSpacing(3).fixedSize(horizontal: false, vertical: true)
             }
             if workspace.source != .stereo {
-                Button("실험적 단음 후보 · 현재 구간") {
-                    workspace.proposePitches(from: workspace.windowStart,
-                        to: min(workspace.windowEnd, workspace.windowStart + 60))
+                Group {
+                    Button("실험적 단음 후보 · 현재 구간") {
+                        workspace.proposePitches(from: workspace.windowStart,
+                            to: min(workspace.windowEnd, workspace.windowStart + 60))
+                    }
+                    Button("코드·다성 후보 (Basic Pitch) · 현재 구간") {
+                        workspace.proposeChords(from: workspace.windowStart,
+                            to: min(workspace.windowEnd, workspace.windowStart + 60))
+                    }
                 }.font(.system(size: 10)).disabled(workspace.prepared == nil || workspace.analyzing || workspace.busy)
                 if !workspace.pitchProposals.isEmpty { proposalReview }
-                Text("깨끗한 단음용 · 수락하면 잠정 음 · 리듬 없음").font(.system(size: 9)).foregroundStyle(Palette.secondary)
+                Text("단음은 깨끗한 단음용 · 코드 후보는 배음이 섞일 수 있음\n수락하면 잠정 음 · 리듬 없음")
+                    .font(.system(size: 9)).foregroundStyle(Palette.secondary).fixedSize(horizontal: false, vertical: true)
             }
             Spacer(minLength: 10)
             StemControls(workspace: workspace)
@@ -231,7 +238,10 @@ struct WorkspaceView: View {
     private var proposalReview: some View {
         VStack(alignment: .leading, spacing: 6) {
             Text("후보 \(workspace.pitchProposals.count)개 · \(workspace.proposalLane.title)")
-            Button("규칙 통과 모두 수락") { workspace.acceptQualifiedProposals() }
+            Button(workspace.pitchProposals.first?.source == .basicPitch
+                   ? "강도 \(String(format: "%.1f", PitchProposal.basicPitchAcceptAllAmplitude)) 이상 모두 수락" : "규칙 통과 모두 수락") {
+                workspace.acceptQualifiedProposals()
+            }
                 .disabled(!workspace.pitchProposals.contains(where: \.qualified))
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 6) {
@@ -243,9 +253,9 @@ struct WorkspaceView: View {
         }.font(.system(size: 9)).buttonStyle(.borderless).disabled(!workspace.canMutateNotes)
     }
 
-    private func proposalRow(_ proposal: MonophonicTranscriber.Proposal) -> some View {
+    private func proposalRow(_ proposal: PitchProposal) -> some View {
         let note = workspace.proposedNote(proposal)
-        let name = proposal.midi.map { TuningDefinition.pitchName(Int($0.rounded())) } ?? "음 미확인"
+        let name = proposal.midi.map(TuningDefinition.pitchName) ?? "음 미확인"
         let time = String(format: "%.3fs", proposal.onset)
         return VStack(alignment: .leading, spacing: 3) {
             Button { workspace.seekForEditing(proposal.onset, requestFocus: false) } label: {
@@ -253,7 +263,7 @@ struct WorkspaceView: View {
                     .foregroundStyle(.primary)
             }.help("커서를 후보 시작 위치로 이동 · 재생으로 확인")
             HStack(spacing: 8) {
-                Text(proposal.qualified ? "규칙 통과" : "불확실")
+                Text(proposal.label)
                     .foregroundStyle(proposal.qualified ? Palette.mint : Palette.secondary)
                 Spacer()
                 Button("수락") { workspace.acceptProposals([proposal]) }.accessibilityLabel("\(time) 후보 수락")
