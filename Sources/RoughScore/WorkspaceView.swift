@@ -100,7 +100,8 @@ struct WorkspaceView: View {
             if workspace.dirty { Circle().fill(Palette.mint).frame(width: 6, height: 6) }
             Button { workspace.importAudio() } label: { Label("오디오 열기", systemImage: "plus") }
                 .disabled(workspace.busy || workspace.analyzing)
-            Button { workspace.save() } label: { Label("저장", systemImage: "square.and.arrow.down") }.disabled(workspace.busy)
+            Button { workspace.save() } label: { Label("저장", systemImage: "square.and.arrow.down") }.disabled(!workspace.canSave)
+            ProjectSaveMenu(workspace: workspace)
             Button { workspace.exportText() } label: { Image(systemName: "square.and.arrow.up") }.help("TAB 텍스트 내보내기")
         }.buttonStyle(.borderless).font(.system(size: 12)).padding(.horizontal, 22).frame(height: 60)
             .background(Palette.panel)

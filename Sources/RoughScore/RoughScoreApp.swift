@@ -43,7 +43,8 @@ struct RoughScoreApp: App {
                 Button("프로젝트 열기…") { workspace.openProject() }.keyboardShortcut("o", modifiers: [.command, .shift])
                     .disabled(workspace.busy || workspace.analyzing)
                 Button("프로젝트 저장…") { workspace.save() }.keyboardShortcut("s")
-                    .disabled(workspace.busy)
+                    .disabled(!workspace.canSave)
+                ProjectSaveCommands(workspace: workspace)
                 Button("TAB 텍스트 내보내기…") { workspace.exportText() }.keyboardShortcut("e", modifiers: [.command, .shift])
             }
             CommandMenu("재생") {

@@ -20,13 +20,30 @@ public enum PortableProjectPackage {
     public struct Snapshot: Sendable {
         public let root: URL
         public let project: ScoreProject
+        private let rootDevice: dev_t
+        private let rootInode: ino_t
+        private let documentInode: ino_t
+        fileprivate init(root: URL, project: ScoreProject, directory: stat, document: stat) {
+            self.root = root; self.project = project
+            rootDevice = directory.st_dev; rootInode = directory.st_ino; documentInode = document.st_ino
+        }
+        fileprivate func matches(directory: stat, document: stat, project: ScoreProject) -> Bool {
+            rootDevice == directory.st_dev && rootInode == directory.st_ino &&
+                documentInode == document.st_ino && self.project == project
+        }
+        public func validate(cancellation: () throws -> Void = {}) throws {
+            let read = try validatedRead(at: root, cancellation: cancellation, hooks: Hooks())
+            guard matches(directory: read.fence.directory.info, document: read.fence.files[0].1.info,
+                          project: read.snapshot.project) else { throw PackageError.sourceChanged }
+        }
         public func resolve(assetID: UUID, cancellation: () throws -> Void = {}) throws -> URL {
             guard let asset = project.assets?.first(where: { $0.id == assetID }), let identity = asset.identity else {
                 throw PackageError.invalidResource
             }
             let directory = try Directory(root)
             let file = try directory.file(asset.reference.path)
-            guard try verifiedIdentity(file, cancellation: cancellation) == identity, directory.isAt(root),
+            guard directory.info.st_dev == rootDevice, directory.info.st_ino == rootInode,
+                  try verifiedIdentity(file, cancellation: cancellation) == identity, directory.isAt(root),
                   sameFile(try directory.file(asset.reference.path).info, file.info) else { throw PackageError.invalidResource }
             try check(cancellation)
             return root.appendingPathComponent(asset.reference.path)
@@ -41,7 +58,7 @@ public enum PortableProjectPackage {
 
     /// Checkpoints also provide deterministic failure injection to package IO tests. No global mutable hooks.
     enum Checkpoint: Equatable {
-        case copying(Int), writingProject, validating, committing
+        case copying(Int), writingProject, validating, committing, publishing, rollingBack
     }
     struct Hooks {
         var checkpoint: (Checkpoint) throws -> Void = { _ in }
@@ -51,21 +68,121 @@ public enum PortableProjectPackage {
     /// Collect all declared media or fail; missing/offline media is never silently omitted.
     /// `sourceRoot` is mandatory when the input contains contained references. No existing destination is replaced.
     public static func collect(_ project: ScoreProject, to destination: URL, sourceRoot: URL? = nil,
-                               cancellation: () throws -> Void = {}) throws -> Snapshot {
-        try collect(project, to: destination, sourceRoot: sourceRoot, cancellation: cancellation, hooks: Hooks())
+                               cancellation: () throws -> Void = {}, verifyingExpectedIdentities: Bool = false) throws -> Snapshot {
+        try collect(project, to: destination, sourceRoot: sourceRoot, cancellation: cancellation, hooks: Hooks(),
+                    verifyingExpectedIdentities: verifyingExpectedIdentities)
+    }
+
+    /// A package is a closed resource set: publishing another document inside it invalidates it.
+    /// Check canonical components and existing ancestor identities, including symlink/case aliases,
+    /// before any staging. Normal replacement of the active package uses `update` instead.
+    public static func validateDestination(_ destination: URL, outside packageRoot: URL) throws {
+        guard destination.isFileURL, packageRoot.isFileURL else { throw PackageError.invalidDestination }
+        let rootURL = packageRoot.resolvingSymlinksInPath().standardizedFileURL
+        let root = try Directory(rootURL)
+        let components = destination.resolvingSymlinksInPath().standardizedFileURL.pathComponents
+        if components.starts(with: rootURL.pathComponents) { throw PackageError.invalidDestination }
+        for depth in stride(from: components.count, through: 1, by: -1) {
+            let ancestor = URL(fileURLWithPath: NSString.path(withComponents: Array(components.prefix(depth))), isDirectory: true)
+            let resolved = ancestor.resolvingSymlinksInPath().standardizedFileURL
+            guard let existing = try? Directory(resolved) else { continue }
+            // Resolve the nearest existing ancestor first: a missing leaf does not resolve ancestor
+            // symlinks on Foundation. Its canonical ancestors also catch aliases into Media.
+            let canonical = resolved.pathComponents
+            if canonical.starts(with: rootURL.pathComponents) { throw PackageError.invalidDestination }
+            for prefix in stride(from: canonical.count, through: 1, by: -1) {
+                let url = URL(fileURLWithPath: NSString.path(withComponents: Array(canonical.prefix(prefix))), isDirectory: true)
+                if let directory = prefix == canonical.count ? existing : try? Directory(url),
+                   sameFile(directory.info, root.info) { throw PackageError.invalidDestination }
+            }
+            return
+        }
+        throw PackageError.invalidDestination
+    }
+
+    /// Replace only the exact previously opened/saved package. Staging is a sibling; resources and
+    /// metadata publish together. An unrelated directory or a stale/ABA document is never overwritten.
+    public static func update(_ project: ScoreProject, replacing expected: Snapshot,
+                              cancellation: () throws -> Void = {}) throws -> Snapshot {
+        try update(project, replacing: expected, cancellation: cancellation, hooks: Hooks())
+    }
+
+    static func update(_ project: ScoreProject, replacing expected: Snapshot,
+                       cancellation: () throws -> Void = {}, hooks: Hooks) throws -> Snapshot {
+        let candidate = try project.validated()
+        let unchangedResources = candidate.assets?.map { ($0.id, $0.reference, $0.identity) }
+        let oldResources = expected.project.assets?.map { ($0.id, $0.reference, $0.identity) }
+        let sameResources = (unchangedResources ?? []).elementsEqual(oldResources ?? [], by: {
+            $0.0 == $1.0 && $0.1 == $1.1 && $0.2 == $1.2
+        }) && candidate.audioPath == nil
+        if !sameResources {
+            return try collect(candidate, to: expected.root, sourceRoot: expected.root,
+                               cancellation: cancellation, hooks: hooks, replacing: expected, verifyingExpectedIdentities: true)
+        }
+        // Notes/offset/tuning changes do not recopy media. Publish just the complete envelope via
+        // a descriptor-relative sibling-file rename while retaining the old resource validation fence.
+        let read = try validatedRead(at: expected.root, cancellation: cancellation, hooks: hooks)
+        guard expected.matches(directory: read.fence.directory.info, document: read.fence.files[0].1.info,
+                               project: read.snapshot.project) else { throw PackageError.sourceChanged }
+        let parentURL = expected.root.deletingLastPathComponent()
+        let parent = try Directory(parentURL)
+        let name = ".roughscore-metadata-" + UUID().uuidString
+        let file = try parent.createFile(name)
+        var retainStage = false
+        defer { if !retainStage { parent.removeCreatedEntries() } }
+        let oldDocument = read.fence.files[0].1
+        try oldDocument.handle.seek(toOffset: 0)
+        let oldBytes = try oldDocument.handle.readToEnd() ?? Data()
+        try hooks.checkpoint(.writingProject)
+        let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        let data = try encoder.encode(Document(format: format, version: version, project: candidate))
+        guard data.count <= maximumJSONBytes else { throw PackageError.invalidPackage }
+        try file.handle.write(contentsOf: data); try file.handle.synchronize()
+        try hooks.checkpoint(.validating)
+        try file.handle.seek(toOffset: 0)
+        guard try file.handle.readToEnd() == data else { throw PackageError.invalidPackage }
+        var writtenInfo = stat()
+        guard fstat(file.fd, &writtenInfo) == 0 else { throw posixError() }
+        try hooks.checkpoint(.committing)
+        try check(cancellation)
+        try read.fence.revalidate()
+        guard parent.isAt(parentURL), parent.matches(name, file.info),
+              sameState(try parent.file(name).info, writtenInfo) else { throw PackageError.sourceChanged }
+        do {
+            try AtomicDocumentPublication.replace(stagingParent: parent.fd, stagedName: name,
+                destinationParent: read.fence.directory.fd, destinationName: "project.json",
+                verifyOld: { try AtomicDocumentPublication.matchesFile(parent: $0, name: $1, receipt: oldDocument.info, bytes: oldBytes) },
+                verifyNew: { try AtomicDocumentPublication.matchesFile(parent: $0, name: $1, receipt: writtenInfo, bytes: data) },
+                removeOld: { if parent.matches(name, oldDocument.info) { _ = unlinkat(parent.fd, name, 0) } },
+                bindingsValid: { parent.isAt(parentURL) && read.fence.directory.isAt(expected.root) },
+                verifyContext: { try read.fence.metadataResourcesIntact(hooks: hooks) },
+                beforePublication: { try hooks.checkpoint(.publishing) }, beforeRollback: { try hooks.checkpoint(.rollingBack) })
+        } catch let conflict as AtomicDocumentPublication.Conflict {
+            retainStage = conflict.retained
+            throw conflict
+        }
+        return Snapshot(root: expected.root, project: candidate, directory: read.fence.directory.info, document: file.info)
     }
 
     static func collect(_ project: ScoreProject, to destination: URL, sourceRoot: URL? = nil,
-                        cancellation: () throws -> Void = {}, hooks: Hooks) throws -> Snapshot {
+                        cancellation: () throws -> Void = {}, hooks: Hooks, replacing expected: Snapshot? = nil, verifyingExpectedIdentities: Bool = false) throws -> Snapshot {
         var candidate = try project.validated()
         try check(cancellation)
         guard destination.isFileURL, !destination.path.contains("\0"),
-              destination.pathExtension == fileExtension,
+              destination.pathExtension.lowercased() == fileExtension,
               !["", ".", ".."].contains(destination.lastPathComponent) else { throw PackageError.invalidDestination }
+        if expected == nil, let sourceRoot { try validateDestination(destination, outside: sourceRoot) }
         let parentURL = destination.deletingLastPathComponent().resolvingSymlinksInPath().standardizedFileURL
         let parent = try Directory(parentURL)
         let destinationName = destination.lastPathComponent
-        guard !parent.exists(destinationName) else { throw PackageError.destinationExists }
+        let previous = try expected.map { receipt -> (snapshot: Snapshot, fence: ValidationFence) in
+            let read = try validatedRead(at: destination, cancellation: cancellation, hooks: hooks)
+            guard receipt.root.standardizedFileURL == destination.standardizedFileURL,
+                  receipt.matches(directory: read.fence.directory.info, document: read.fence.files[0].1.info,
+                                  project: read.snapshot.project) else { throw PackageError.sourceChanged }
+            return read
+        }
+        if previous == nil, parent.exists(destinationName) { throw PackageError.destinationExists }
         let stageName = ".roughscore-stage-" + UUID().uuidString
         guard mkdirat(parent.fd, stageName, 0o700) == 0 else { throw posixError() }
         let stageURL = parentURL.appendingPathComponent(stageName, isDirectory: true)
@@ -90,6 +207,7 @@ public enum PortableProjectPackage {
         }
         let sourceDirectory = try sourceRoot.map { try Directory($0.resolvingSymlinksInPath().standardizedFileURL) }
         let media = try assets.isEmpty ? nil : stage.createDirectory("Media")
+        var sources: [(AudioReference, File)] = []
         for index in assets.indices {
             _ = try assets[index].validated()
             try check(cancellation)
@@ -109,7 +227,17 @@ public enum PortableProjectPackage {
             let copiedHash = try copy(source, to: output, cancellation: cancellation, hooks: hooks)
             let identity = try verifiedIdentity(stage.file(path), cancellation: cancellation)
             guard identity.sha256 == copiedHash, try fingerprint(source, cancellation: cancellation) == copiedHash,
-                  source.unchanged else { throw PackageError.sourceChanged }
+                  source.unchanged, (!verifyingExpectedIdentities || assets[index].identity.map({ $0 == identity }) ?? true) else { throw PackageError.sourceChanged }
+            switch assets[index].reference.kind {
+            case .external:
+                let reopened = try File(URL(fileURLWithPath: assets[index].reference.path).resolvingSymlinksInPath())
+                guard sameState(reopened.info, source.info) else { throw PackageError.sourceChanged }
+            case .contained:
+                guard let sourceDirectory, let sourceRoot, sourceDirectory.isAt(sourceRoot.standardizedFileURL),
+                      sameState(try sourceDirectory.file(assets[index].reference.path).info, source.info)
+                else { throw PackageError.sourceChanged }
+            }
+            sources.append((assets[index].reference, source))
             assets[index].reference = AudioReference(kind: .contained, path: path)
             assets[index].identity = identity
         }
@@ -137,14 +265,44 @@ public enum PortableProjectPackage {
         try check(cancellation)
         // Retain the descriptors and mutation state used to validate JSON, media and every directory.
         try validated.fence.revalidate()
-        guard parent.matches(stageName, stage.info), parent.isAt(parentURL) else { throw PackageError.unsafePath }
-        // RENAME_EXCL atomically rejects collisions, including ones created after the initial existence check.
-        guard renameatx_np(parent.fd, stageName, parent.fd, destinationName, UInt32(RENAME_EXCL)) == 0 else {
-            if errno == EEXIST || errno == ENOTEMPTY { throw PackageError.destinationExists }
-            throw posixError()
+        for (reference, file) in sources {
+            let reopened: File
+            if reference.kind == .external { reopened = try File(URL(fileURLWithPath: reference.path).resolvingSymlinksInPath()) }
+            else {
+                guard let sourceDirectory, let sourceRoot, sourceDirectory.isAt(sourceRoot.standardizedFileURL) else { throw PackageError.sourceChanged }
+                reopened = try sourceDirectory.file(reference.path)
+            }
+            guard file.unchanged, sameState(file.info, reopened.info) else { throw PackageError.sourceChanged }
         }
-        committed = true
-        return Snapshot(root: parentURL.appendingPathComponent(destinationName, isDirectory: true), project: candidate)
+        guard parent.matches(stageName, stage.info), parent.isAt(parentURL) else { throw PackageError.unsafePath }
+        if let previous {
+            try previous.fence.revalidate()
+            guard parent.matches(destinationName, previous.fence.directory.info) else { throw PackageError.sourceChanged }
+            do {
+                try AtomicDocumentPublication.replace(stagingParent: parent.fd, stagedName: stageName,
+                    destinationParent: parent.fd, destinationName: destinationName,
+                    verifyOld: { try previous.fence.matchesContents(parent: $0, name: $1) },
+                    verifyNew: { try validated.fence.matchesContents(parent: $0, name: $1) },
+                    removeOld: {
+                        previous.fence.removeVerifiedEntries()
+                        if parent.matches(stageName, previous.fence.directory.info) { _ = unlinkat(parent.fd, stageName, AT_REMOVEDIR) }
+                    }, bindingsValid: { parent.isAt(parentURL) },
+                    beforePublication: { try hooks.checkpoint(.publishing) }, beforeRollback: { try hooks.checkpoint(.rollingBack) })
+            } catch let conflict as AtomicDocumentPublication.Conflict {
+                committed = conflict.retained // Keep every entry of an unexpected retained version.
+                throw conflict
+            }
+            committed = true
+        } else {
+            // RENAME_EXCL atomically rejects collisions, including late creations.
+            guard renameatx_np(parent.fd, stageName, parent.fd, destinationName, UInt32(RENAME_EXCL)) == 0 else {
+                if errno == EEXIST || errno == ENOTEMPTY { throw PackageError.destinationExists }
+                throw posixError()
+            }
+            committed = true
+        }
+        return Snapshot(root: parentURL.appendingPathComponent(destinationName, isDirectory: true),
+                        project: candidate, directory: stage.info, document: jsonFile.info)
     }
 
     public static func read(at root: URL, cancellation: () throws -> Void = {}) throws -> Snapshot {
@@ -189,7 +347,7 @@ public enum PortableProjectPackage {
         let fence = ValidationFence(root: canonical, directory: directory, files: verifiedFiles, directories: directories)
         try check(cancellation)
         try fence.revalidate()
-        return (Snapshot(root: canonical, project: project), fence)
+        return (Snapshot(root: canonical, project: project, directory: directory.info, document: json.info), fence)
     }
 
     private static func check(_ cancellation: () throws -> Void) throws {
@@ -214,6 +372,43 @@ public enum PortableProjectPackage {
         let directory: Directory
         let files: [(String, File)]
         let directories: [(String, Directory)]
+        func metadataResourcesIntact(hooks: Hooks) throws -> Bool {
+            for (path, file) in files where path != "project.json" {
+                guard file.unchanged, sameState(try directory.file(path).info, file.info) else { return false }
+            }
+            for (name, child) in directories {
+                guard child.unchanged, directory.matches(name, child.info) else { return false }
+            }
+            // JSON exchange legitimately changes the root's timestamps. Anchor a fresh descriptor
+            // for strict tree enumeration while preserving every original media/directory receipt.
+            let current = try Directory(parent: directory, name: ".")
+            _ = try current.validateTree(expected: Set(files.map { $0.0 }), cancellation: {}, hooks: hooks)
+            return true
+        }
+        func matchesContents(parent: Int32, name: String) throws -> Bool {
+            var entry = stat()
+            guard fstatat(parent, name, &entry, AT_SYMLINK_NOFOLLOW) == 0,
+                  AtomicDocumentPublication.sameContentState(entry, directory.info) else { return false }
+            for (path, file) in files {
+                guard file.unchanged, sameState(try directory.file(path).info, file.info) else { return false }
+            }
+            for (name, child) in directories {
+                guard child.unchanged, directory.matches(name, child.info) else { return false }
+            }
+            return true
+        }
+        func removeVerifiedEntries() {
+            for (path, file) in files {
+                if path == "project.json", directory.matches(path, file.info) { _ = unlinkat(directory.fd, path, 0) }
+                else if let media = directories.first(where: { $0.0 == "Media" })?.1,
+                        directory.matches("Media", media.info), media.matches(URL(fileURLWithPath: path).lastPathComponent, file.info) {
+                    _ = unlinkat(media.fd, URL(fileURLWithPath: path).lastPathComponent, 0)
+                }
+            }
+            for (name, child) in directories where directory.matches(name, child.info) {
+                _ = unlinkat(directory.fd, name, AT_REMOVEDIR)
+            }
+        }
         func revalidate() throws {
             for (path, file) in files {
                 guard file.unchanged, sameState(try directory.file(path).info, file.info) else {
