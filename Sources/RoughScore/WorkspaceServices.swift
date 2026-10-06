@@ -11,6 +11,7 @@ struct WorkspaceServices: Sendable {
     var align: @Sendable (PreparedAudio, AudioAsset, Double) async throws -> PreparedAudio = {
         try await AudioPreparation.alignedStem($0, asset: $1, duration: $2)
     }
+    var sessionStore: WorkspaceSessionStore = .disabled
     var cacheEnvironment: AudioCacheEnvironment? = nil
     var createDemo: @Sendable (ScoreProject) async throws -> URL
     var readProject: @Sendable (URL) async throws -> ScoreProject
@@ -48,9 +49,13 @@ struct WorkspaceServices: Sendable {
 
     @MainActor static var live: WorkspaceServices {
         switch AudioCacheEnvironment.shared {
-        case .success(let environment): return cachedLive(environment: environment)
+        case .success(let environment):
+            var services = cachedLive(environment: environment)
+            services.sessionStore = .live
+            return services
         case .failure(let error):
             var services = cachedLive(environment: nil)
+            services.sessionStore = .live
             services.prepare = { _, _ in throw error }
             return services
         }

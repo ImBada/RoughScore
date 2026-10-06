@@ -71,16 +71,19 @@ struct ScoreSheetView: View {
                 }
             }
         }
-        .onChange(of: workspace.measuresPerSystem) { previous, _ in
+        .onChange(of: ProjectViewSetting(projectID: workspace.editorIdentity, value: workspace.measuresPerSystem)) { previous, current in
+            guard previous.projectID == current.projectID else { return }
             workspace.reflowScore(from: ScoreLayout(duration: workspace.project.duration, bars: workspace.scoreSummary?.bars ?? [],
-                                                   measuresPerSystem: previous, systemsPerPage: workspace.showBothLanes ? 2 : 4))
+                                                   measuresPerSystem: previous.value, systemsPerPage: workspace.showBothLanes ? 2 : 4))
         }
-        .onChange(of: workspace.showBothLanes) { previous, _ in
+        .onChange(of: ProjectViewSetting(projectID: workspace.editorIdentity, value: workspace.showBothLanes)) { previous, current in
+            guard previous.projectID == current.projectID else { return }
             workspace.reflowScore(from: ScoreLayout(duration: workspace.project.duration, bars: workspace.scoreSummary?.bars ?? [],
-                                                   measuresPerSystem: workspace.measuresPerSystem, systemsPerPage: previous ? 2 : 4))
+                                                   measuresPerSystem: workspace.measuresPerSystem, systemsPerPage: previous.value ? 2 : 4))
         }
-        .onChange(of: workspace.project.analyses) { previous, _ in
-            let summary = workspace.scoreSummary(in: previous)
+        .onChange(of: ProjectViewSetting(projectID: workspace.editorIdentity, value: workspace.project.analyses)) { previous, current in
+            guard previous.projectID == current.projectID else { return }
+            let summary = workspace.scoreSummary(in: previous.value)
             workspace.reflowScore(from: ScoreLayout(duration: workspace.project.duration, bars: summary?.bars ?? [],
                                                    measuresPerSystem: workspace.measuresPerSystem, systemsPerPage: workspace.showBothLanes ? 2 : 4))
         }
@@ -104,7 +107,9 @@ struct ScoreSheetView: View {
                 .font(.system(size: 10)).foregroundStyle(Palette.secondary)
             Spacer(minLength: 0)
             Toggle("재생 따라가기", isOn: $workspace.followScore)
-                .onChange(of: workspace.followScore) { _, follow in if follow { workspace.followScoreCursor() } }
+                .onChange(of: ProjectViewSetting(projectID: workspace.editorIdentity, value: workspace.followScore)) { previous, current in
+                    if previous.projectID == current.projectID && current.value { workspace.followScoreCursor() }
+                }
             Button { workspace.browseScorePage(page - 1) } label: { Image(systemName: "chevron.left") }
                 .disabled(page == 0).help("이전 악보 페이지")
             Picker("페이지", selection: Binding(get: { workspace.displayedScorePage }, set: { workspace.browseScorePage($0) })) {

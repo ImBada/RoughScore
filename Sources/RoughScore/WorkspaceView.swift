@@ -16,6 +16,12 @@ func clockLabel(_ seconds: Double) -> String {
     String(format: "%02d:%05.2f", Int(seconds) / 60, seconds.truncatingRemainder(dividingBy: 60))
 }
 
+/// A settings observer must distinguish restoration into another document from an in-document edit.
+struct ProjectViewSetting<Value: Equatable>: Equatable {
+    let projectID: UUID
+    let value: Value
+}
+
 struct WorkspaceView: View {
     @ObservedObject var workspace: Workspace
     var body: some View {
@@ -69,11 +75,15 @@ struct WorkspaceView: View {
                     NoteInspector(workspace: workspace).frame(width: 250).disabled(!workspace.canMutateNotes)
                 }
             }
+            // Recreate project-scoped SwiftUI state/observers after activation. Otherwise old
+            // onChange reflow/zoom callbacks can replace the page/window we just restored.
+            .id(workspace.editorIdentity)
             .disabled(!workspace.canEdit)
             Divider().overlay(Palette.border)
             HStack(spacing: 8) {
                 Circle().fill(workspace.busy || workspace.analyzing ? .orange : Palette.mint).frame(width: 5, height: 5)
-                Text(workspace.status).lineLimit(1)
+                Text(workspace.sessionPersistenceError ?? workspace.status).lineLimit(1)
+                    .help(workspace.sessionPersistenceError ?? workspace.status)
                 Spacer()
                 Text("LOCAL AUDIO  /  STANDARD E").tracking(1.4)
             }
@@ -306,7 +316,10 @@ struct WorkspaceView: View {
                     Text("1초").tag(1.0); Text("2초").tag(2.0); Text("3초").tag(3.0)
                     Text("6초").tag(6.0); Text("12초").tag(12.0); Text("24초").tag(24.0); Text("48초").tag(48.0)
                 }.labelsHidden().frame(width: 75)
-                    .onChange(of: workspace.windowLength) { _, _ in workspace.zoomPositionWindow(by: 1) }
+                    .onChange(of: ProjectViewSetting(projectID: workspace.editorIdentity, value: workspace.windowLength)) { previous, current in
+                        guard previous.projectID == current.projectID else { return }
+                        workspace.zoomPositionWindow(by: 1)
+                    }
                 Button { workspace.zoomPositionWindow(by: 0.5) } label: { Image(systemName: "plus.magnifyingglass") }.help("음 주변 확대")
                 Button { workspace.zoomPositionWindow(by: 2) } label: { Image(systemName: "minus.magnifyingglass") }.help("음 주변 축소")
                 Button { workspace.moveWindow(-1) } label: { Image(systemName: "chevron.left") }.help("이전 구간")
