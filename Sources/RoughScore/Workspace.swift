@@ -122,6 +122,12 @@ final class Workspace: ObservableObject {
     }
     private var magnetDragInput: MagnetDragInput?
     var requestKeyboardFocus: (() -> Void)?
+    var requestControlFocus: ((Bool) -> Bool)?
+    var keyboardFocusOwner: UUID?
+    var controlFocusOwner: UUID?
+    var scoreDisplayOwner: UUID?
+    var requestScoreFitPageToggle: (() -> Void)?
+    @Published var tabInputFocused = false // Ephemeral; never saved or added to note history.
     private var fretEntry = FretEntryBuffer()
     private var newlyCreatedID: UUID?
     private struct StemState {
@@ -396,13 +402,13 @@ final class Workspace: ObservableObject {
         if followScore { followScoreCursor() }
     }
 
-    func seekForEditing(_ time: Double, lane: GuitarLane? = nil) {
+    func seekForEditing(_ time: Double, lane: GuitarLane? = nil, requestFocus: Bool = true) {
         guard canMutateNotes, let bounded = TimeBounds.clamp(time, duration: project.duration) else { return }
         endMemoEditing()
         clearPitchDetection()
         fretEntry.reset(); newlyCreatedID = nil; resetSelection()
         if let lane { selectLane(lane) }
-        jumpToScoreTime(bounded); requestKeyboardFocus?()
+        jumpToScoreTime(bounded); if requestFocus { requestKeyboardFocus?() }
         status = "\(clockLabel(cursor)) · \(activeString)번 줄에 숫자로 입력 · 파형 드래그로 반복"
     }
     func selectLane(_ value: GuitarLane) {
@@ -886,7 +892,7 @@ final class Workspace: ObservableObject {
         status = "붙여넣기 위치 \(clockLabel(cursor)) · 선택 \(selectedIDs.count)개 유지 · ⌘D 복제"
     }
     @discardableResult
-    func applyBatch(_ command: TabEditCommand) -> Bool {
+    func applyBatch(_ command: TabEditCommand, requestFocus: Bool = true, preserveInputContext: Bool = false) -> Bool {
         guard canMutateNotes else { return false }
         do {
             let result = try command.apply(to: project)
@@ -894,15 +900,27 @@ final class Workspace: ObservableObject {
             recordUndo(preservingCursor: true); finishEntry()
             project = result.project
             if let pasted = result.pastedSelection { setSelection(pasted) }
-            else if case .move = command {
+            else if case .move = command, !preserveInputContext {
                 // After position changes copy starts at the group's current earliest onset.
                 setSelection(try! TabSelection(ids: selectedIDs, primaryID: selectedID))
             }
-            if let selected { activeString = selected.string; lane = selected.lane }
-            changed(); requestKeyboardFocus?(); status = "선택 일괄 편집 · ⌘Z 한 번으로 전체 취소"
+            if !preserveInputContext, let selected { activeString = selected.string; lane = selected.lane }
+            changed(); if requestFocus { requestKeyboardFocus?() }; status = "선택 일괄 편집 · ⌘Z 한 번으로 전체 취소"
             return true
         } catch { status = "선택 편집 거절 · 전체 유지 · \(error)"; return false }
     }
+    /// A named AX action edits exactly one live UUID, preserving the current group and focus.
+    @discardableResult
+    func moveAccessibleNote(id: UUID, editorID: UUID, timeDelta: Double = 0, stringDelta: Int = 0) -> Bool {
+        guard editorIdentity == editorID, canMutateNotes, timeDelta.isFinite,
+              project.events.contains(where: { $0.id == id }) else { return false }
+        return applyBatch(.move(selection: try! TabSelection(ids: [id], primaryID: id),
+            timeDelta: timeDelta, stringDelta: stringDelta), requestFocus: false, preserveInputContext: true)
+    }
+    func canAccessNote(id: UUID, editorID: UUID) -> Bool {
+        editorIdentity == editorID && canMutateNotes && project.events.contains { $0.id == id }
+    }
+
     @discardableResult
     func offsetSelection(time: Double, strings: Int = 0, targetLane: GuitarLane? = nil) -> Bool {
         applyBatch(.move(selection: editSelection, timeDelta: time, stringDelta: strings, targetLane: targetLane))
@@ -1143,7 +1161,9 @@ final class Workspace: ObservableObject {
     func selectAdjacentEvent(backwards: Bool = false) {
         guard canMutateNotes else { return }
         let events = project.events.filter { $0.lane == lane }.sorted {
-            $0.time == $1.time ? $0.string < $1.string : $0.time < $1.time
+            if $0.time != $1.time { return $0.time < $1.time }
+            if $0.string != $1.string { return $0.string < $1.string }
+            return $0.id.uuidString < $1.id.uuidString
         }
         guard !events.isEmpty else { return }
         if let index = events.firstIndex(where: { $0.id == selectedID }) {
