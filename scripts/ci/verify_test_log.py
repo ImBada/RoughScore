@@ -6,6 +6,25 @@ from pathlib import Path
 import re
 import sys
 
+INTAKE_TESTS = [
+    "nativeCallbackQueuesFirstWinsAndStartsLifecycleOnce",
+    "structuralRejectionsNeverPromptCancelStartupOrMutate",
+    "automaticStartupLateAIsInvalidatedAndCannotReleaseExplicitBOrFallback",
+    "cancelledExplicitDoesNotResumeStartupAndLateACannotReportSuccessOverB",
+    "dirtyFailureAndCancelRetainDestinationHistoryAndBaseline",
+    "modalReentryCannotBorrowDiscardAuthorization",
+    "saveSuccessAllowsExactStorageRebaseButRejectsRememberCallbackMutation",
+    "savePanelReentryRejectsSecondRequestAndKeepsCancelledWork",
+    "busyWorkRejectsWithoutPreemption",
+    "dragPreviewIsPreservedUntilAuthorizationAndNeverCommitted",
+    "collectedOfflineAndUnicodeUppercaseLinkedUseValidatedReaders",
+    "successfulNativeLoadPausesPlayersRestoresBoundedSessionAndRejectsSameUUIDActions",
+    "shutdownClearsQueuedAndLateRequestsAndReplacementCannotDrain",
+    "exportRenderAndDestinationReentryRejectNativeRequestsWithoutCancellingExport",
+    "nativeMemoCaretMarkedTextAndUndoSurviveCancelledOrFailedOpen",
+    "saveAndContinueRebasesDemoAudioThroughTheOrdinaryWriterBeforeOpening",
+    "coordinatorShutdownOrOwnerReplacementCancelsInFlightWithoutLateCommit",
+]
 
 def verify(log, minimum=72):
     text = re.sub(r"\x1b\[[0-9;]*m", "", log)
@@ -16,9 +35,15 @@ def verify(log, minimum=72):
         raise ValueError("Generated fixture integration did not execute its decode assertions")
     if not re.search(r"Test realAudioFixtureWhenProvided\(\) passed", text):
         raise ValueError("Generated fixture integration test did not pass")
+    if "Suite ExternalProjectIntakeTests passed" not in text:
+        raise ValueError("Native external project intake suite did not execute/pass")
+    for name in INTAKE_TESTS:
+        if not re.search(r"Test " + name + r"\([^\n]*\)(?: with \d+ test cases)? passed", text):
+            raise ValueError("Native external project intake case did not pass: " + name)
     return {
         "swiftTestingCases": int(summaries[-1]),
         "generatedCompressedIntegration": "passed",
+        "nativeExternalIntakeFunctions": len(INTAKE_TESTS),
         "realGuitarEvaluation": "skipped: no licensed/labeled real-guitar dataset supplied",
     }
 

@@ -35,6 +35,10 @@ struct WorkspaceServices: Sendable {
     }
     var chooseSaveDestination: @MainActor @Sendable (ProjectSaveRequest) -> URL? = { $0.choose() }
     var nativeTextUndo: @MainActor @Sendable () -> NativeTextUndoTarget? = { NativeTextUndoTarget.active() }
+    var discardDecision: @MainActor @Sendable () -> DiscardDecision = { DiscardDecision.choose() }
+    var nativeModalActive: @MainActor @Sendable () -> Bool = {
+        NSApp?.modalWindow != nil || (NSApp?.windows.contains { $0.attachedSheet != nil } ?? false)
+    }
     var fileExists: @Sendable (URL) -> Bool
     var initialProject: @MainActor @Sendable () -> URL? = {
         initialProjectURL(arguments: CommandLine.arguments)
@@ -96,5 +100,21 @@ struct WorkspaceServices: Sendable {
         lastProject: { UserDefaults.standard.string(forKey: "lastProjectPath").map { URL(fileURLWithPath: $0) } },
         rememberProject: { UserDefaults.standard.set($0.path, forKey: "lastProjectPath") }
         )
+    }
+}
+
+enum DiscardDecision: Sendable {
+    case saveAndContinue, cancel, discard
+
+    @MainActor static func choose() -> Self {
+        let alert = NSAlert()
+        alert.messageText = "저장하지 않은 TAB 변경 사항이 있습니다."
+        alert.informativeText = "저장한 뒤 계속하거나, 변경 사항을 버릴 수 있습니다."
+        alert.addButton(withTitle: "저장하고 계속"); alert.addButton(withTitle: "취소"); alert.addButton(withTitle: "변경 버리기")
+        switch alert.runModal() {
+        case .alertFirstButtonReturn: return .saveAndContinue
+        case .alertThirdButtonReturn: return .discard
+        default: return .cancel
+        }
     }
 }

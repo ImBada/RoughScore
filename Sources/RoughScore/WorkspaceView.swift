@@ -29,6 +29,14 @@ struct WorkspaceView: View {
     var body: some View {
         VStack(spacing: 0) {
             topBar.disabled(!workspace.canEdit)
+            if let message = workspace.externalOpenError {
+                HStack {
+                    Label(message, systemImage: "exclamationmark.triangle")
+                        .accessibilityIdentifier("external-project-open-error")
+                    Spacer()
+                    Button("닫기") { workspace.externalOpenError = nil }
+                }.font(.system(size: 12)).padding(10).background(Palette.panel)
+            }
             Divider().overlay(Palette.border)
             VStack(alignment: .leading, spacing: 4) {
                 Text(workspace.tabInputFocused ? "TAB 입력 · Tab 다음 음 · ⌃Tab 컨트롤로 · ⇧⌃Tab 뒤로" : "컨트롤 탐색 · Tab 이동 · TAB 입력 버튼 또는 ⌘Return으로 입력")

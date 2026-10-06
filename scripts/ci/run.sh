@@ -8,11 +8,11 @@ fi
 repo_root="$(cd "$(dirname "$0")/../.." && pwd)"
 output_root="$1"
 expected_analysis="$2"
-if [[ -e "$output_root" ]]; then
+if [[ -e "$output_root" || -L "$output_root" ]]; then
   printf '%s\n' 'Output directory must not exist; refusing to overwrite data.' >&2
   exit 2
 fi
-mkdir -p "$output_root"
+mkdir "$output_root"
 output_root="$(cd "$output_root" && pwd)"
 cd "$repo_root"
 export CLANG_MODULE_CACHE_PATH="$output_root/module-cache"

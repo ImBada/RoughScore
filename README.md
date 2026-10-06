@@ -8,12 +8,13 @@
 Xcode 27 SDK / Swift 6.4로 빌드를 확인합니다. 최소 실행 OS는 macOS 15이며, Music Understanding 분석은 macOS 27 이상에서만 활성화됩니다. 외부 패키지 의존성은 없습니다.
 
 ```sh
-zsh scripts/build-app.sh
-open build/RoughScore.app
+bash scripts/build-app.sh /chosen/NEW_OUTPUT_DIRECTORY --version 0.1.0 --build 1
 ```
 
+출력 디렉터리는 존재하지 않아야 하며 소스 체크아웃 밖의 기존 부모 폴더 아래에 지정합니다. 기본값은 clean 소스만 허용합니다. 명시적인 `--allow-dirty`는 수정된 소스 provenance를 기록하는 로컬 QA 전용입니다. 새 scratch/SPM/module cache에서 빌드하고 실제 bin 경로로 새 앱을 구성한 뒤, 버전·build·소스 SHA가 붙은 ZIP, SHA-256 checksum, manifest를 만듭니다. plist·Mach-O·실행 권한·strict ad-hoc 서명과 추출한 archive를 headless 검증합니다. 이전 출력은 덮어쓰거나 삭제하지 않으며 앱을 자동 실행/설치/공개하지 않습니다. [개발자 설치와 프로젝트 열기 안내](docs/DEVELOPER-INSTALL.md)를 따르세요.
+
 Xcode에서 `Package.swift`를 열고 RoughScore 실행 타깃을 실행할 수도 있습니다.
-오래된 SDK에서는 `canImport(MusicUnderstanding)` 분기가 분석을 제외합니다. 해당 SDK 조합의 빌드는 별도 검증하지 않았습니다.
+오래된 SDK에서는 `canImport(MusicUnderstanding)` 분기가 분석을 제외합니다. 현재 HEAD의 macOS 15/fallback SDK 빌드와 실행은 별도 검증하지 않았습니다. ad-hoc archive는 Developer ID/notarization/Gatekeeper 신뢰 배포(#19)를 뜻하지 않습니다. GitHub CI는 사용자 설정대로 비활성 상태를 유지하고 로컬 검증만 실행합니다.
 
 ## 현재 사용 흐름
 
@@ -114,13 +115,14 @@ L/R 또한 서로 다른 기타를 보장하지 않습니다. 양쪽에 같은 �
 ## 검증
 
 ```sh
-CLANG_MODULE_CACHE_PATH=/tmp/RoughScore-module-cache \
-SWIFT_MODULECACHE_PATH=/tmp/RoughScore-module-cache \
-swift test --disable-sandbox --cache-path /tmp/RoughScore-spm-cache
+bash scripts/ci/run.sh /chosen/ANOTHER_NEW_OUTPUT_DIRECTORY enabled
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s Tests/Evaluation
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/ci
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/delivery
 ```
 
 데이터 저장 왕복, 잘못된 프렛/시간/중복 ID/분석 데이터 거절, 박 스냅, 실제 PCM 좌우 독립성, 모노 복제, 데모 채널 정렬을 검증합니다.
-Xcode 27 / macOS 27.0.1에서 72개 테스트와 릴리스 앱 빌드가 통과했습니다. 실제 MP3 디코딩 통합 검증과 앱에서의 숫자 입력·프렛 교체·실행 취소·파형 드래그·자동 저장도 확인했습니다. 긴 곡 레이아웃 테스트는 3분 곡의 모든 구간 커버리지, 페이지 경계, 마지막 짧은 줄, 가변 템포의 시간↔위치 왕복, 전주·중복 마디 처리, 보기 전환 시 메모 보존을 포함합니다. 실행 화면에서 합성 데모에 대한 실제 Apple 분석 반환, L/R 전환, 프렛·시간·잠정 표시 편집, 저장·다시 열기를 확인했습니다. 실제 밴드 음원에 대한 분리·자동 채보 정확도는 검증 대상이 아닙니다.
+기존 검증 기록과 별개로 로컬 runner는 생성한 AAC의 decode/channel assertions와 실제 Swift Testing 실행 수, native external intake suite의 통과 marker를 확인하고 release executable을 빌드합니다. 최종 bundle/archive 검증은 위 builder에서 별도로 수행합니다. enabled/disabled는 실제 선택한 SDK의 compile capability와 일치해야 하며 없는 fallback lane을 통과로 표시하지 않습니다. 실제 MP3 디코딩 통합 검증과 앱에서의 숫자 입력·프렛 교체·실행 취소·파형 드래그·자동 저장도 확인했습니다. 긴 곡 레이아웃 테스트는 3분 곡의 모든 구간 커버리지, 페이지 경계, 마지막 짧은 줄, 가변 템포의 시간↔위치 왕복, 전주·중복 마디 처리, 보기 전환 시 메모 보존을 포함합니다. 실행 화면에서 합성 데모에 대한 실제 Apple 분석 반환, L/R 전환, 프렛·시간·잠정 표시 편집, 저장·다시 열기를 확인했습니다. 실제 밴드 음원에 대한 분리·자동 채보 정확도는 검증 대상이 아닙니다.
 앱은 SwiftUI, 오디오 입출력은 AVFoundation, 분석은 Music Understanding으로 구성합니다.
 
 ## 소스
