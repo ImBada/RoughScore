@@ -60,7 +60,7 @@ final class Workspace: ObservableObject {
     @Published private(set) var loadProgress = 0.0
     @Published var analyzing = false
     /// Transient review list, never saved. Only an explicit accept turns a row into TAB.
-    @Published private(set) var pitchProposals: [MonophonicTranscriber.Proposal] = []
+    @Published private(set) var pitchProposals: [PitchProposal] = []
     /// The L/R lane whose channel produced `pitchProposals`.
     private(set) var proposalLane: GuitarLane = .left
     @Published var status = "데모 준비 중"
@@ -1517,35 +1517,32 @@ final class Workspace: ObservableObject {
     /// Advisory clean-mono pitch detection on the selected channel's actual original-time audio.
     /// A bounded region is read; no manual UUID, fingering, rhythm or confidence flag is mutated.
     @discardableResult
-    func proposePitches(from start: Double, to end: Double) -> Task<Void, Never>? {
+    func proposePitches(from start: Double, to end: Double) -> Task<Void, Never>? { propose(.mono, from: start, to: end) }
+    /// Basic Pitch chord/polyphonic candidates for the same selected channel and region.
+    @discardableResult
+    func proposeChords(from start: Double, to end: Double) -> Task<Void, Never>? { propose(.basicPitch, from: start, to: end) }
+
+    private func propose(_ engine: PitchProposal.Source, from start: Double, to end: Double) -> Task<Void, Never>? {
         guard canEdit, !analyzing, source != .stereo, let audio = prepared,
               start.isFinite, end.isFinite, start >= 0, end > start, end <= project.duration, end - start <= 60 else { return nil }
         let channel = source, identity = projectIdentity, id = UUID()
         analysisID = id; analyzing = true; pitchProposals = []
         let environment = services.cacheEnvironment
-        let worker = Task.detached(priority: .userInitiated) {
-            if let environment, let cached = audio.resource.cached {
-                return try await environment.pitches(cached, channel: channel, from: start, to: end)
+        let worker = Task.detached(priority: .userInitiated) { () throws -> [PitchProposal] in
+            if engine == .mono, let environment, let cached = audio.resource.cached {
+                return try await environment.pitches(cached, channel: channel, from: start, to: end).proposals.map(PitchProposal.init)
             }
             let access = try audio.fileAccess(for: channel)
             defer { withExtendedLifetime(access) {} }
-            let file = try AVAudioFile(forReading: access.url, commonFormat: .pcmFormatFloat32, interleaved: false)
-            let sampleRate = file.processingFormat.sampleRate
-            let first = Int64(floor(start * sampleRate)), last = min(file.length, Int64(ceil(end * sampleRate)))
-            guard first < last, last - first <= Int64(60 * sampleRate) else { throw AudioIssue.unsupported }
-            file.framePosition = first
-            let buffer = AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: 4096)!
-            var samples: [Float] = []; samples.reserveCapacity(Int(last - first))
-            while file.framePosition < last {
-                try Task.checkCancellation()
-                try file.read(into: buffer, frameCount: AVAudioFrameCount(min(4096, last - file.framePosition)))
-                guard buffer.frameLength > 0 else { throw AudioIssue.unsupported }
-                samples.append(contentsOf: UnsafeBufferPointer(start: buffer.floatChannelData![0], count: Int(buffer.frameLength)))
+            let region = try AudioPreparation.readRegion(access.url, from: start, to: end)
+            let proposals = switch engine {
+            case .mono: try MonophonicTranscriber().analyze(samples: region.samples, sampleRate: region.sampleRate,
+                timeOrigin: region.origin, isCancelled: { Task.isCancelled }).proposals.map(PitchProposal.init)
+            case .basicPitch: try BasicPitchTranscriber().transcribe(samples: region.samples, sampleRate: region.sampleRate,
+                timeOrigin: region.origin, isCancelled: { Task.isCancelled }).map(PitchProposal.init)
             }
-            let result = try MonophonicTranscriber().analyze(samples: samples, sampleRate: sampleRate,
-                timeOrigin: Double(first) / sampleRate, isCancelled: { Task.isCancelled })
             try access.validate()
-            return result
+            return proposals
         }
         let task = Task {
             defer { if analysisID == id { analyzing = false; analysisID = nil; analysisTask = nil } }
@@ -1558,43 +1555,47 @@ final class Workspace: ObservableObject {
                 }
                 guard !Task.isCancelled, !closed, analysisID == id, projectIdentity == identity,
                       prepared?.generation == audio.generation, source == channel else { return }
-                showProposals(result.proposals, lane: channel == .left ? .left : .right)
-                status = "실험적 단음 후보 \(result.proposals.count)개 · 수락 전에는 TAB 변경 없음"
+                showProposals(result, lane: channel == .left ? .left : .right)
+                status = (engine == .mono ? "실험적 단음 후보 " : "코드·다성 후보 (Basic Pitch) ")
+                    + "\(result.count)개 · 수락 전에는 TAB 변경 없음"
             } catch { if !closed, analysisID == id { self.error = error.localizedDescription } }
         }
         analysisTask = task; return task
     }
 
-    func showProposals(_ proposals: [MonophonicTranscriber.Proposal], lane: GuitarLane) {
+    func showProposals(_ proposals: [PitchProposal], lane: GuitarLane) {
         pitchProposals = proposals; proposalLane = lane
     }
 
-    /// The note a proposal would become: rounded MIDI at the best FingeringResolver position,
-    /// or `?` on the active string when the pitch is unknown or unplayable. Rhythm stays nil.
-    func proposedNote(_ proposal: MonophonicTranscriber.Proposal) -> TabEvent { proposedNote(proposal, in: project) }
-    private func proposedNote(_ proposal: MonophonicTranscriber.Proposal, in project: ScoreProject) -> TabEvent {
+    /// The note a proposal would become: its MIDI at the best FingeringResolver position whose
+    /// string is free (notes in the lane within 30 ms sound together, as a chord), or `?` when the
+    /// pitch is unknown, unplayable or has no free string. Rhythm stays nil.
+    func proposedNote(_ proposal: PitchProposal) -> TabEvent { proposedNote(proposal, in: project) }
+    private func proposedNote(_ proposal: PitchProposal, in project: ScoreProject) -> TabEvent {
+        let used = Set(project.events.filter { $0.lane == proposalLane && abs($0.time - proposal.onset) < 0.03 }.map(\.string))
         let best = proposal.midi.flatMap { midi in
-            FingeringResolver.resolve(midi: Int(midi.rounded()), project: project,
-                context: FingeringContext(lane: proposalLane, time: proposal.onset)).candidates.first
+            FingeringResolver.resolve(midi: midi, project: project,
+                context: FingeringContext(lane: proposalLane, time: proposal.onset)).candidates.first { !used.contains($0.string) }
         }
-        return TabEvent(time: proposal.onset, lane: proposalLane, string: best?.string ?? activeString,
-                        fret: best?.fret, tentative: true)
+        let string = best?.string ?? ([activeString] + Array(1...6)).first { !used.contains($0) } ?? activeString
+        return TabEvent(time: proposal.onset, lane: proposalLane, string: string, fret: best?.fret, tentative: true)
     }
 
     /// Inserts tentative notes at the exact onsets in one undo step. A row whose note already
     /// exists (same lane and sounding pitch within 30 ms) is skipped; existing TAB is never changed.
+    /// Rows accepted together that sound together get different strings.
     @discardableResult
-    func acceptProposals(_ chosen: [MonophonicTranscriber.Proposal]) -> Int {
+    func acceptProposals(_ chosen: [PitchProposal]) -> Int {
         guard canMutateNotes, !chosen.isEmpty else { return 0 }
         func pitch(_ event: TabEvent, in project: ScoreProject) -> Int? {
             event.fret.flatMap { project.soundingMIDI(string: event.string, fret: $0) }
         }
         var candidate = project, added: [UUID] = []
         for proposal in chosen {
-            let note = proposedNote(proposal, in: candidate), notePitch = pitch(note, in: candidate)
             guard !candidate.events.contains(where: {
-                $0.lane == note.lane && abs($0.time - note.time) < 0.03 && pitch($0, in: candidate) == notePitch
+                $0.lane == proposalLane && abs($0.time - proposal.onset) < 0.03 && pitch($0, in: candidate) == proposal.midi
             }) else { continue }
+            let note = proposedNote(proposal, in: candidate)
             candidate.events.append(note); added.append(note.id)
         }
         guard (try? candidate.validated()) != nil else { status = "후보 수락 실패 · TAB 유지"; return 0 }
@@ -1610,7 +1611,7 @@ final class Workspace: ObservableObject {
     }
     @discardableResult
     func acceptQualifiedProposals() -> Int { acceptProposals(pitchProposals.filter(\.qualified)) }
-    func rejectProposal(_ proposal: MonophonicTranscriber.Proposal) {
+    func rejectProposal(_ proposal: PitchProposal) {
         pitchProposals.removeAll { $0 == proposal }
         status = "후보 거절 · TAB 변경 없음"
     }
