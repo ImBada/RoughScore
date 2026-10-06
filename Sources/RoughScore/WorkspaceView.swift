@@ -211,13 +211,8 @@ struct WorkspaceView: View {
                     workspace.proposePitches(from: workspace.windowStart,
                         to: min(workspace.windowEnd, workspace.windowStart + 60))
                 }.font(.system(size: 10)).disabled(workspace.prepared == nil || workspace.analyzing || workspace.busy)
-                ForEach(Array(workspace.pitchProposals.prefix(6).enumerated()), id: \.offset) { _, proposal in
-                    Text(String(format: "%.3fs · ", proposal.onset) +
-                        (proposal.frequencyHz.map { String(format: "%.1fHz", $0) } ?? "음 미확인") +
-                        (proposal.qualified ? " · 규칙 통과" : " · 불확실"))
-                        .font(.system(size: 9)).foregroundStyle(Palette.secondary)
-                }
-                Text("깨끗한 단음용 · 확률/운지/리듬 추정 없음").font(.system(size: 9)).foregroundStyle(Palette.secondary)
+                if !workspace.pitchProposals.isEmpty { proposalReview }
+                Text("깨끗한 단음용 · 수락하면 잠정 음 · 리듬 없음").font(.system(size: 9)).foregroundStyle(Palette.secondary)
             }
             Spacer(minLength: 10)
             StemControls(workspace: workspace)
@@ -230,6 +225,41 @@ struct WorkspaceView: View {
                 }
             }.font(.system(size: 10)).buttonStyle(.borderless).disabled(workspace.busy || workspace.analyzing)
         }.padding(18).background(Palette.panel)
+    }
+
+    /// Click a row to move the cursor to its onset; 수락 inserts one tentative note (⌘Z undoes it).
+    private var proposalReview: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("후보 \(workspace.pitchProposals.count)개 · \(workspace.proposalLane.title)")
+            Button("규칙 통과 모두 수락") { workspace.acceptQualifiedProposals() }
+                .disabled(!workspace.pitchProposals.contains(where: \.qualified))
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 6) {
+                    ForEach(Array(workspace.pitchProposals.enumerated()), id: \.offset) { _, proposal in
+                        proposalRow(proposal)
+                    }
+                }
+            }.frame(maxHeight: 220)
+        }.font(.system(size: 9)).buttonStyle(.borderless).disabled(!workspace.canMutateNotes)
+    }
+
+    private func proposalRow(_ proposal: MonophonicTranscriber.Proposal) -> some View {
+        let note = workspace.proposedNote(proposal)
+        let name = proposal.midi.map { TuningDefinition.pitchName(Int($0.rounded())) } ?? "음 미확인"
+        let time = String(format: "%.3fs", proposal.onset)
+        return VStack(alignment: .leading, spacing: 3) {
+            Button { workspace.seekForEditing(proposal.onset, requestFocus: false) } label: {
+                Text("\(time) · \(name) · \(note.string)번 줄 \(note.fret.map { "\($0)프렛" } ?? "?")")
+                    .foregroundStyle(.primary)
+            }.help("커서를 후보 시작 위치로 이동 · 재생으로 확인")
+            HStack(spacing: 8) {
+                Text(proposal.qualified ? "규칙 통과" : "불확실")
+                    .foregroundStyle(proposal.qualified ? Palette.mint : Palette.secondary)
+                Spacer()
+                Button("수락") { workspace.acceptProposals([proposal]) }.accessibilityLabel("\(time) 후보 수락")
+                Button("거절") { workspace.rejectProposal(proposal) }.accessibilityLabel("\(time) 후보 거절")
+            }
+        }.padding(6).background(Palette.elevated, in: RoundedRectangle(cornerRadius: 6))
     }
 
     private var heading: some View {

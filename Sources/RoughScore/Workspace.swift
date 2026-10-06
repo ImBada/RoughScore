@@ -59,7 +59,10 @@ final class Workspace: ObservableObject {
     @Published private(set) var busy = false
     @Published private(set) var loadProgress = 0.0
     @Published var analyzing = false
+    /// Transient review list, never saved. Only an explicit accept turns a row into TAB.
     @Published private(set) var pitchProposals: [MonophonicTranscriber.Proposal] = []
+    /// The L/R lane whose channel produced `pitchProposals`.
+    private(set) var proposalLane: GuitarLane = .left
     @Published var status = "데모 준비 중"
     @Published var error: String?
     // Separate, nonmodal feedback cannot overwrite a save/load error or nest an NSAlert.
@@ -1555,10 +1558,61 @@ final class Workspace: ObservableObject {
                 }
                 guard !Task.isCancelled, !closed, analysisID == id, projectIdentity == identity,
                       prepared?.generation == audio.generation, source == channel else { return }
-                pitchProposals = result.proposals; status = "실험적 단음 후보 · 원곡 초 기준 · TAB은 수동 유지"
+                showProposals(result.proposals, lane: channel == .left ? .left : .right)
+                status = "실험적 단음 후보 \(result.proposals.count)개 · 수락 전에는 TAB 변경 없음"
             } catch { if !closed, analysisID == id { self.error = error.localizedDescription } }
         }
         analysisTask = task; return task
+    }
+
+    func showProposals(_ proposals: [MonophonicTranscriber.Proposal], lane: GuitarLane) {
+        pitchProposals = proposals; proposalLane = lane
+    }
+
+    /// The note a proposal would become: rounded MIDI at the best FingeringResolver position,
+    /// or `?` on the active string when the pitch is unknown or unplayable. Rhythm stays nil.
+    func proposedNote(_ proposal: MonophonicTranscriber.Proposal) -> TabEvent { proposedNote(proposal, in: project) }
+    private func proposedNote(_ proposal: MonophonicTranscriber.Proposal, in project: ScoreProject) -> TabEvent {
+        let best = proposal.midi.flatMap { midi in
+            FingeringResolver.resolve(midi: Int(midi.rounded()), project: project,
+                context: FingeringContext(lane: proposalLane, time: proposal.onset)).candidates.first
+        }
+        return TabEvent(time: proposal.onset, lane: proposalLane, string: best?.string ?? activeString,
+                        fret: best?.fret, tentative: true)
+    }
+
+    /// Inserts tentative notes at the exact onsets in one undo step. A row whose note already
+    /// exists (same lane and sounding pitch within 30 ms) is skipped; existing TAB is never changed.
+    @discardableResult
+    func acceptProposals(_ chosen: [MonophonicTranscriber.Proposal]) -> Int {
+        guard canMutateNotes, !chosen.isEmpty else { return 0 }
+        func pitch(_ event: TabEvent, in project: ScoreProject) -> Int? {
+            event.fret.flatMap { project.soundingMIDI(string: event.string, fret: $0) }
+        }
+        var candidate = project, added: [UUID] = []
+        for proposal in chosen {
+            let note = proposedNote(proposal, in: candidate), notePitch = pitch(note, in: candidate)
+            guard !candidate.events.contains(where: {
+                $0.lane == note.lane && abs($0.time - note.time) < 0.03 && pitch($0, in: candidate) == notePitch
+            }) else { continue }
+            candidate.events.append(note); added.append(note.id)
+        }
+        guard (try? candidate.validated()) != nil else { status = "후보 수락 실패 · TAB 유지"; return 0 }
+        pitchProposals.removeAll { chosen.contains($0) }
+        let skipped = chosen.count - added.count
+        guard !added.isEmpty else { status = "같은 음이 이미 있어 건너뜀 · TAB 변경 없음"; return 0 }
+        recordUndo(preservingCursor: true); finishEntry()
+        project = candidate
+        setSelection(try! TabSelection(ids: Set(added), primaryID: added.first))
+        changed()
+        status = "후보 \(added.count)개 수락 · 잠정 음" + (skipped > 0 ? " · 같은 음 \(skipped)개 건너뜀" : "") + " · ⌘Z 한 번으로 취소"
+        return added.count
+    }
+    @discardableResult
+    func acceptQualifiedProposals() -> Int { acceptProposals(pitchProposals.filter(\.qualified)) }
+    func rejectProposal(_ proposal: MonophonicTranscriber.Proposal) {
+        pitchProposals.removeAll { $0 == proposal }
+        status = "후보 거절 · TAB 변경 없음"
     }
 
     func cancelAnalysis() {
