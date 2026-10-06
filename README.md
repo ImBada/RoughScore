@@ -94,6 +94,11 @@ L/R 또한 서로 다른 기타를 보장하지 않습니다. 양쪽에 같은 �
 다음 구현 순서는 기타 스템 품질 비교 → 깨끗한 단음 기타의 음고 후보 → 코드·왜곡 기타 → 운지 후보입니다.
 분리/채보 모델은 실제 기타 스템을 출력하는지, 라이선스, 오프라인 실행, Core ML 변환, 메모리·지연을 검증한 뒤 선정합니다.
 
+다성 음 후보 엔진(`BasicPitchTranscriber`, 아직 화면에 연결하지 않음)은 Spotify [Basic Pitch](https://github.com/spotify/basic-pitch)(Apache-2.0)의 ICASSP 2022 `nmp` Core ML 모델을 앱에 포함해 기기에서 실행합니다.
+L/R은 각각 따로 22,050Hz로 변환해 추론하며, 결과는 원곡 초 단위의 시작·끝, MIDI, 평균 활성도, 1/3반음 단위 피치 윤곽입니다. 활성도는 보정된 확률이 아니고 배음이 별도 음 후보로 나올 수 있습니다.
+모델 출처는 v0.4.0 커밋 `9991303bba609a3b93089d13ec80d1d495083596`의 `basic_pitch/saved_models/icassp_2022/nmp.mlpackage`입니다(SHA-256 `Manifest.json` c1fa5ef8acc34703edcd4e90e9a8640bd4673d9f3a68753c3b9d1ca0365e2928, `model.mlmodel` af7bf7d49bc167e0bf0c30aa2ca6b432c3e10df048d2dd4173ff3a738c020858, `weights/weight.bin` 691a6b63c7ddcdde0ee131ff3986dcb1250df47cd738612efde966ba9b4c99cd).
+이를 `xcrun coremlcompiler compile --platform macOS --deployment-target 15.0`으로 컴파일한 `nmp.mlmodelc`(weight.bin은 원본과 동일)와 원본 LICENSE·NOTICE를 `Sources/RoughScore/Resources/BasicPitch`에 두고, 앱 번들에는 `Contents/Resources/BasicPitch`로 복사합니다.
+
 ## 파일·처리 범위
 
 - 기본 튜닝 E B G D A E, 6줄 / 0–24프렛. 다른 튜닝·카포 편집은 후속 범위입니다.
@@ -129,6 +134,7 @@ PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/delivery
 
 - `Sources/RoughScoreCore/Project.swift`: 부분 TAB과 프로젝트 형식
 - `Sources/RoughScore/AudioServices.swift`: PCM 채널 추출, 파형, 데모, Apple 분석, 분리 모델 연결 지점
+- `Sources/RoughScore/BasicPitchTranscriber.swift`, `Sources/RoughScoreCore/BasicPitchDecoder.swift`: Basic Pitch 다성 음 후보 추론과 디코딩
 - `Sources/RoughScore/Workspace.swift`: 편집·재생·루프·저장 흐름
 - `Sources/RoughScore/WorkspaceView.swift`: 워크스페이스와 TAB 화면
 - `Sources/RoughScoreCore/ScoreLayout.swift`: 마디/시간 블록의 줄바꿈·페이지·시간 좌표

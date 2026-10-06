@@ -92,6 +92,7 @@ def build(args):
     app = payload / "RoughScore.app"
     (app / "Contents/MacOS").mkdir(parents=True)
     shutil.copy2(binary, app / "Contents/MacOS/RoughScore")
+    shutil.copytree(REPO / "Sources/RoughScore/Resources/BasicPitch", app / "Contents/Resources/BasicPitch")
     with (app / "Contents/Info.plist").open("xb") as stream:
         plistlib.dump(metadata(args.version, args.build), stream)
     # This freshly copied compiler binary may already have a linker ad-hoc seal.
