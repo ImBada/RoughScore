@@ -98,6 +98,7 @@ struct ExportCoreTests {
             switch element {
             case .system(let system): #expect(system.top >= plan.contentTop && system.top + system.height <= plan.contentBottom)
             case .text(let text): #expect(text.top >= plan.contentTop && text.top + text.height <= plan.contentBottom + 0.00001)
+            case .waveform(let wave): #expect(wave.top >= plan.contentTop && wave.top + wave.height <= plan.contentBottom + 0.00001)
             }
         } }
         #expect(project == Self.dense())

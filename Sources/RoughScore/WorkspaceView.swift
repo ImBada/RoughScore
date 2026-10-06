@@ -92,6 +92,10 @@ struct WorkspaceView: View {
         }
         .background(Palette.background).tint(Palette.mint)
         .background(TabKeyboardBridge(workspace: workspace).allowsHitTesting(false))
+        .sheet(item: Binding(get: { workspace.exportSnapshot }, set: { if $0 == nil { workspace.cancelExport() } })) { snapshot in
+            ScoreExportOptionsView(snapshot: snapshot, format: snapshot.initialFormat,
+                submit: { options in Task { _ = await workspace.completeExport(snapshot, options: options) } }, cancel: { workspace.cancelExport() })
+        }
         .alert("작업을 완료하지 못했습니다", isPresented: Binding(get: { workspace.error != nil }, set: { if !$0 { workspace.error = nil } })) {
             Button("확인") { workspace.error = nil }
         } message: { Text(workspace.error ?? "") }
@@ -112,7 +116,7 @@ struct WorkspaceView: View {
                 .disabled(workspace.busy || workspace.analyzing)
             Button { workspace.save() } label: { Label("저장", systemImage: "square.and.arrow.down") }.disabled(!workspace.canSave)
             ProjectSaveMenu(workspace: workspace)
-            Button { workspace.exportText() } label: { Image(systemName: "square.and.arrow.up") }.help("TAB 텍스트 내보내기")
+            ScoreExportMenu(workspace: workspace)
         }.buttonStyle(.borderless).font(.system(size: 12)).padding(.horizontal, 22).frame(height: 60)
             .background(Palette.panel)
     }

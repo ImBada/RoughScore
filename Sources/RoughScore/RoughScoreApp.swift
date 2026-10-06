@@ -45,7 +45,10 @@ struct RoughScoreApp: App {
                 Button("프로젝트 저장…") { workspace.save() }.keyboardShortcut("s")
                     .disabled(!workspace.canSave)
                 ProjectSaveCommands(workspace: workspace)
-                Button("TAB 텍스트 내보내기…") { workspace.exportText() }.keyboardShortcut("e", modifiers: [.command, .shift])
+                ScoreExportCommands(workspace: workspace)
+            }
+            CommandGroup(replacing: .printItem) {
+                Button("인쇄…") { workspace.beginExport(.print) }.keyboardShortcut("p").disabled(!workspace.canExport)
             }
             CommandMenu("재생") {
                 Button(workspace.playing ? "일시 정지" : "재생") { workspace.togglePlayback() }

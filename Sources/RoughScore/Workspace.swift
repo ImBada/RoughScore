@@ -61,6 +61,8 @@ final class Workspace: ObservableObject {
     @Published private(set) var pitchProposals: [MonophonicTranscriber.Proposal] = []
     @Published var status = "데모 준비 중"
     @Published var error: String?
+    @Published private(set) var exportSnapshot: ScoreExportSnapshot?
+    @Published private(set) var exportBusy = false
     @Published var isDemo = true
     @Published private(set) var saveState: SaveState = .unsaved
     @Published var dirty = false
@@ -237,8 +239,9 @@ final class Workspace: ObservableObject {
     }
 
     var canEdit: Bool { !busy && !closed }
-    var canLoad: Bool { canEdit && !analyzing }
-    var canMutateNotes: Bool { canEdit && positionDrag == nil }
+    var canLoad: Bool { canEdit && !analyzing && exportSnapshot == nil && !exportBusy }
+    var canMutateNotes: Bool { canEdit && positionDrag == nil && exportSnapshot == nil && !exportBusy }
+    var canExport: Bool { canEdit && positionDrag == nil && dragEvents == nil && exportSnapshot == nil && !exportBusy }
 
 
     var windowEnd: Double { min(project.duration, windowStart + windowLength) }
@@ -1217,7 +1220,7 @@ final class Workspace: ObservableObject {
         return snapshot.id
     }
     func undoEdit() {
-        guard canEdit else { return }
+        guard canEdit, exportSnapshot == nil, !exportBusy else { return }
         if positionDrag != nil { cancelPositionDrag(); return }
         endMemoEditing()
         guard let snapshot = undoHistory.last else { return }
@@ -2195,6 +2198,9 @@ final class Workspace: ObservableObject {
                 return true
             }
             flushSession()
+            // Save As rebases active document/media locations without changing editorIdentity.
+            // A request captured against the previous storage binding no longer owns an export.
+            if !replaceActive { cancelExport() }
             project = saved; savedProject = saved; projectURL = destination; currentPackage = package
             rebasePreparedSources(to: saved, package: package)
             refreshSaveState()
@@ -2263,25 +2269,66 @@ final class Workspace: ObservableObject {
     }
 
     func exportText() {
-        guard canEdit else { return }
-        let panel = NSSavePanel(); panel.nameFieldStringValue = project.title + "-TAB.txt"
-        panel.allowedContentTypes = [.plainText]
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-        do { try exportedText().write(to: url, atomically: true, encoding: .utf8); status = "시간 기반 TAB 텍스트 내보내기 완료" }
-        catch { self.error = error.localizedDescription }
+        beginExport(.tab)
     }
 
     func exportedText() throws -> String {
-        let formatter = { (time: Double) in String(format: "%.3f", time) }
-        var text = "RoughScore — \(project.title)\n\(try SparseTabExporter.tuningHeader(for: project))\n? = 음 미확인 / 미기록 구간은 쉼표가 아닙니다\n\n"
-        for lane in GuitarLane.allCases {
-            text += "[\(lane.title)]\n시간(초)\t줄\t프렛\t음표 길이\t표시\t메모\n"
-            for event in project.events.filter({ $0.lane == lane }).sorted(by: { $0.time < $1.time }) {
-                text += "\(formatter(event.time))\t\(event.string)\t\(event.fret.map(String.init) ?? "?")\t\(event.length?.title ?? "미지정")\t\(event.tentative ? "잠정" : "수동")\t\(event.memo.replacingOccurrences(of: "\n", with: " "))\n"
-            }
-            text += "\n"
+        try SparseTabExporter.tab(project, analysis: .init(project: project, asset: activeAsset))
+    }
+
+    func beginExport(_ format: ScoreExportFormat) {
+        guard canExport else { return }
+        let protection = exportDestinationProtection()
+        let waveform = prepared.map { ScoreRenderPlan.WaveformInput(duration: $0.duration, left: $0.leftPeaks,
+            right: $0.rightPeaks, label: assetRole == .original ? "Original" : "Imported Stem") }
+        exportSnapshot = ScoreExportSnapshot(projectID: projectIdentity, initialFormat: format, project: project,
+            selectedRange: selectionRange, analysis: .init(project: project, asset: activeAsset), waveform: waveform,
+            protectedFiles: protection.files, packageRoot: protection.root)
+    }
+
+    private func exportDestinationProtection() -> (files: [URL], root: URL?) {
+        var files = [projectURL].compactMap { $0 }
+        if let currentPackage { files.append(currentPackage.root.appendingPathComponent("project.json")) }
+        if let path = project.audioPath { files.append(URL(fileURLWithPath: path)) }
+        for asset in project.assets ?? [] {
+            if asset.reference.kind == .external { files.append(URL(fileURLWithPath: asset.reference.path)) }
+            else if let currentPackage { files.append(currentPackage.root.appendingPathComponent(asset.reference.path)) }
         }
-        return text
+        return (files, currentPackage?.root)
+    }
+    func cancelExport() { exportSnapshot = nil }
+
+    @discardableResult
+    func completeExport(_ snapshot: ScoreExportSnapshot, options: ScoreExportOptions, to destination: URL? = nil) async -> Bool {
+        guard canEdit, !exportBusy, exportSnapshot?.id == snapshot.id, projectIdentity == snapshot.projectID else { return false }
+        exportBusy = true
+        defer { exportBusy = false; if exportSnapshot?.id == snapshot.id { exportSnapshot = nil } }
+        do {
+            let producer = Task.detached(priority: .userInitiated) { try snapshot.bytes(options) }
+            let data = try await withTaskCancellationHandler { try await producer.value } onCancel: { producer.cancel() }
+            try Task.checkCancellation()
+            guard !closed, projectIdentity == snapshot.projectID, exportSnapshot?.id == snapshot.id else { return false }
+            if options.format == .print {
+                let completed = try services.exportServices.print(data, options.settings)
+                if completed, projectIdentity == snapshot.projectID { status = "인쇄 문서 작업 완료" }
+                return completed
+            }
+            guard let url = destination ?? services.exportServices.chooseDestination(options.format, snapshot.project.title) else { return false }
+            try Task.checkCancellation()
+            guard !closed, projectIdentity == snapshot.projectID, exportSnapshot?.id == snapshot.id else { return false }
+            let protection = exportDestinationProtection()
+            try snapshot.validateDestination(url, format: options.format,
+                additionalProtectedFiles: protection.files, additionalPackageRoot: protection.root)
+            try Task.checkCancellation()
+            try services.exportServices.write(data, url)
+            if !closed, projectIdentity == snapshot.projectID { status = options.format.title + " 내보내기 완료" }
+            return true
+        } catch is CancellationError {
+            return false
+        } catch {
+            if !closed, projectIdentity == snapshot.projectID { self.error = error.localizedDescription }
+            return false
+        }
     }
 
     func confirmDiscard() -> Bool {

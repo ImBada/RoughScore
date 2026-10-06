@@ -12,6 +12,7 @@ struct WorkspaceServices: Sendable {
         try await AudioPreparation.alignedStem($0, asset: $1, duration: $2)
     }
     var sessionStore: WorkspaceSessionStore = .disabled
+    var exportServices = ScoreExportServices()
     var cacheEnvironment: AudioCacheEnvironment? = nil
     var createDemo: @Sendable (ScoreProject) async throws -> URL
     var readProject: @Sendable (URL) async throws -> ScoreProject
