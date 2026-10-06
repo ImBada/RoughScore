@@ -15,6 +15,10 @@ import zipfile
 BUNDLE_ID = "com.roughscore.sketch"
 TYPES = [("com.roughscore.project", "RoughScore Project", "public.json", "roughscore", False),
          ("com.roughscore.portable-project", "RoughScore Collected Project", "com.apple.package", "roughscorepkg", True)]
+# Basic Pitch model with its Apache-2.0 LICENSE/NOTICE, copied from Sources/RoughScore/Resources/BasicPitch.
+MODEL_RESOURCES = ["Contents/Resources/BasicPitch/" + name for name in ["LICENSE", "NOTICE",
+    "nmp.mlmodelc/analytics/coremldata.bin", "nmp.mlmodelc/coremldata.bin", "nmp.mlmodelc/metadata.json",
+    "nmp.mlmodelc/model.mil", "nmp.mlmodelc/weights/weight.bin"]]
 
 
 def run(args, **kwargs):
@@ -98,7 +102,7 @@ def verify_bundle(app, version, build, manifest=None):
     if not app.is_dir() or app.is_symlink():
         raise ValueError("expected a real app directory")
     files = {p.relative_to(app).as_posix() for p in app.rglob("*") if p.is_file()}
-    expected = {"Contents/Info.plist", "Contents/MacOS/RoughScore", "Contents/_CodeSignature/CodeResources"}
+    expected = {"Contents/Info.plist", "Contents/MacOS/RoughScore", "Contents/_CodeSignature/CodeResources", *MODEL_RESOURCES}
     if files != expected or any(p.is_symlink() for p in app.rglob("*")):
         raise ValueError("unexpected bundle contents")
     run(["/usr/bin/plutil", "-lint", str(app / "Contents/Info.plist")])
@@ -145,7 +149,7 @@ def verify_archive(archive, checksum):
             raise ValueError("archive root/name disagreement")
         allowed = {root + "/" + name for name in ["DEVELOPER-INSTALL.md", "manifest.json",
             "RoughScore.app/Contents/Info.plist", "RoughScore.app/Contents/MacOS/RoughScore",
-            "RoughScore.app/Contents/_CodeSignature/CodeResources"]}
+            "RoughScore.app/Contents/_CodeSignature/CodeResources", *("RoughScore.app/" + p for p in MODEL_RESOURCES)]}
         if set(names) != allowed:
             raise ValueError("unexpected archive contents")
         for member in z.infolist():

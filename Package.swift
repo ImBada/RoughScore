@@ -7,7 +7,8 @@ let package = Package(
     products: [.executable(name: "RoughScore", targets: ["RoughScore"])],
     targets: [
         .target(name: "RoughScoreCore"),
-        .executableTarget(name: "RoughScore", dependencies: ["RoughScoreCore"]),
+        .executableTarget(name: "RoughScore", dependencies: ["RoughScoreCore"],
+                          resources: [.copy("Resources/BasicPitch")]),
         .testTarget(name: "RoughScoreTests", dependencies: ["RoughScoreCore", "RoughScore"])
     ]
 )

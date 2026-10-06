@@ -10,7 +10,7 @@ import unittest
 import zipfile
 
 from build import REPO, new_output, parse_args, source_snapshot
-from bundle import check_manifest, check_metadata, metadata, sha256, validate_version, verify_archive, verify_bundle
+from bundle import MODEL_RESOURCES, check_manifest, check_metadata, metadata, sha256, validate_version, verify_archive, verify_bundle
 
 
 class DeliveryMetadataTests(unittest.TestCase):
@@ -158,6 +158,8 @@ class DeliveryVerificationNegativeTests(unittest.TestCase):
             executable = app / "Contents/MacOS/RoughScore"; executable.write_text("#!/bin/sh\nexit 0\n"); executable.chmod(0o755)
             (app / "Contents/Info.plist").write_bytes(plistlib.dumps(metadata("1.2.3", "1")))
             (app / "Contents/_CodeSignature/CodeResources").write_text("mock")
+            for name in MODEL_RESOURCES:
+                (app / name).parent.mkdir(parents=True, exist_ok=True); (app / name).write_text("mock")
             with self.assertRaisesRegex(ValueError, "not Mach-O"):
                 verify_bundle(app, "1.2.3", "1")
 
