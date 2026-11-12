@@ -26,6 +26,9 @@ final class Workspace: ObservableObject {
     @Published private(set) var audioConnection = "오디오 준비 전"
     @Published private(set) var assetRole: AudioAsset.Role = .original { didSet { sessionChanged() } }
     @Published private(set) var stemConnection = "스템 없음"
+    /// 0...1 while on-device guitar separation runs; nil otherwise. Separation never edits TAB.
+    @Published private(set) var separationProgress: Double?
+    private var separationTask: Task<Void, Never>?
     private var originalAudio: PreparedAudio?
     private var stemAudio: PreparedAudio?
     private var inactivePlayers: [ListeningSource: PreparedPlayer] = [:]
@@ -1855,6 +1858,51 @@ final class Workspace: ObservableObject {
         }
     }
 
+    var guitarSeparatorInstalled: Bool { GuitarSeparator.isInstalled }
+    var canSeparateGuitar: Bool {
+        canLoad && separationTask == nil && project.originalAsset?.identity != nil && guitarSeparatorInstalled
+    }
+
+    /// Separates the original's guitar on-device (BS-RoFormer) into a new stereo file and attaches
+    /// it as the stem through the normal staged attach path. Editing continues meanwhile.
+    func separateGuitar() {
+        guard canSeparateGuitar, let asset = project.originalAsset, let sha = asset.identity?.sha256 else { return }
+        let url: URL
+        do { url = try assetURL(asset, package: currentPackage) } catch { self.error = error.localizedDescription; return }
+        let projectID = projectIdentity
+        separationProgress = 0; status = "기타 분리 중 · 편집은 계속할 수 있습니다"
+        let report: @Sendable (Double) -> Void = { [weak self] value in
+            Task { @MainActor [weak self] in
+                guard let self, self.projectIdentity == projectID, self.separationTask != nil else { return }
+                self.separationProgress = value
+            }
+        }
+        separationTask = Task { [weak self] in
+            do {
+                let stem = try await GuitarSeparator.separate(original: url, originalSHA256: sha, progress: report)
+                // The output is keyed by content hash: refuse it if the original changed meanwhile.
+                guard try await AudioPreparation.fingerprint(url) == sha else { throw AudioIssue.sourceChanged }
+                guard let self, !self.closed, self.projectIdentity == projectID else { return }
+                self.separationTask = nil; self.separationProgress = nil
+                guard let attach = self.attachStem(at: stem, offset: 0) else {
+                    self.status = "기타 분리 완료 · 다른 작업 중이라 연결하지 못했습니다. ‘스템 연결…’로 직접 연결하세요"
+                    return
+                }
+                if await attach.value { self.status = "기타 분리 완료 · 분리된 스템 연결됨 · TAB 변경 없음" }
+            } catch {
+                guard let self, !self.closed, self.projectIdentity == projectID else { return }
+                self.separationTask = nil; self.separationProgress = nil
+                if error is CancellationError { self.status = "기타 분리 취소됨" }
+                else { self.error = error.localizedDescription; self.status = "기타 분리 실패 · TAB/스템 변경 없음" }
+            }
+        }
+    }
+
+    func cancelGuitarSeparation() {
+        separationTask?.cancel(); separationTask = nil; separationProgress = nil
+        if !closed { status = "기타 분리 취소됨" }
+    }
+
     func detachStem() {
         if busy { cancelLoading() }
         guard canLoad, project.stemAsset != nil else { return }
@@ -2230,6 +2278,7 @@ final class Workspace: ObservableObject {
         prepared = staged.audio; originalAudio = staged.audio; assetRole = .original; project = staged.project
         audioConnection = staged.offlineReason.map { "오프라인 · " + $0 } ??
             (staged.audio?.isMono == true ? "모노 연결됨 · L/R 동일" : "스테레오 연결됨 · 원본 L/R")
+        separationTask?.cancel(); separationTask = nil; separationProgress = nil
         projectIdentity = UUID(); projectURL = staged.projectURL; currentPackage = staged.package; isDemo = staged.isDemo
         resetSelection(); activeString = 6
         cursor = session.cursor; windowStart = session.windowStart; windowLength = session.windowLength
@@ -2539,6 +2588,7 @@ final class Workspace: ObservableObject {
         busy = false
         autosaveTask?.cancel()
         analysisTask?.cancel(); timer?.invalidate(); stopAndCleanAudio()
+        separationTask?.cancel(); separationTask = nil
         undoHistory.removeAll(); redoHistory.removeAll()
         if let demoURL { try? FileManager.default.removeItem(at: demoURL) }
     }
