@@ -287,8 +287,3 @@ enum AppleMusicAnalysis {
         throw AudioIssue.unavailable
     }
 }
-
-/// Future model adapters must return actual guitar audio, not the broad `other` activity class.
-protocol GuitarStemSeparating: Sendable {
-    func separateGuitar(from stereoAudio: URL) async throws -> URL
-}

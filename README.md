@@ -58,7 +58,7 @@ Xcode에서 `Package.swift`를 열고 RoughScore 실행 타깃을 실행할 수�
 | --- | --- | --- |
 | 박, 마디, BPM, 조성, 구조 | Music Understanding의 실제 분석, 검출 마디 기반 악보 페이지, 구조 구간 표시 | 조성 변화 표시 |
 | 악기 활동 | vocal / drum / bass / other 중 other의 구간을 프로젝트에 저장 | 보조 표시로만 사용 |
-| 기타 소리 분리 | 미구현. 이미 분리한 파일을 열 수 있음 | 별도 기타 스템 모델 + Core ML 어댑터 |
+| 기타 소리 분리 | BS-RoFormer SW 기타 헤드(Core ML, 기기 내 실행, 별도 설치)로 스테레오 기타 스템 생성 · 이미 분리한 파일도 연결 가능 | 왜곡·두 기타 품질 측정 |
 | L/R | PCM을 각각 모노 파일로 추출, 별도 재생·분석·TAB | 스테레오 보존 분리 모델의 결과에서도 같은 흐름 |
 | 각 음 위치·음고 검출 | 미구현. 사용자가 시간축에 입력 | 별도 onset / 다성 음고 추정 모델 |
 | TAB 운지 | 사용자가 줄·프렛 선택 | 튜닝·포지션·이동량 기반 후보 제안 |
@@ -90,9 +90,20 @@ L/R 또한 서로 다른 기타를 보장하지 않습니다. 양쪽에 같은 �
 벤딩·슬라이드·비브라토, 왜곡 기타 배음, 두 기타의 겹침은 초기 정확도 검증에서 별도 실패 유형으로 기록합니다.
 기본은 사용자가 선택한 짧은 구간만 분석하고, 미채보 구간에 음이나 쉼표를 자동으로 채우지 않습니다.
 
-`GuitarStemSeparating` 프로토콜을 분리 모델의 연결 지점으로 마련했습니다. 현재 연결된 모델은 없습니다.
-다음 구현 순서는 기타 스템 품질 비교 → 깨끗한 단음 기타의 음고 후보 → 코드·왜곡 기타 → 운지 후보입니다.
-분리/채보 모델은 실제 기타 스템을 출력하는지, 라이선스, 오프라인 실행, Core ML 변환, 메모리·지연을 검증한 뒤 선정합니다.
+### 기타 자동 분리 (BS-RoFormer SW)
+
+`기타 스템` 패널의 `원곡에서 기타 분리`는 원곡 스테레오를 기기에서 분리해 새 스테레오 기타 파일을 만들고 기존 스템 연결 흐름으로 붙입니다. 원곡·TAB은 바뀌지 않고, 분리 중에도 편집할 수 있으며 취소할 수 있습니다. 결과는 원곡과 같은 샘플레이트·길이(오프셋 0)이며 `~/Library/Application Support/RoughScore/SeparatedStems`에 원곡 내용 해시로 저장되어 같은 곡은 다시 계산하지 않습니다.
+
+모델은 앱에 포함하지 않습니다. 한 번 설치합니다(약 700MB 체크포인트를 받아 98MB Core ML로 변환, `uv` 필요, 변환 중 RAM 약 7GB):
+
+```sh
+scripts/separation/install-guitar-separator.sh
+```
+
+- 모델: [MVSep 기타 리더보드](https://mvsep.com/quality_checker/leaderboard/guitar) 상위인 BS-RoFormer SW 6-stem 중 기타 헤드만 변환. 체크포인트 `enerjazzer/BS-ROFO-SW-Fixed@a443a29`(SHA-256 `24e7d35e…`), 코드 [ZFTurbo/Music-Source-Separation-Training](https://github.com/ZFTurbo/Music-Source-Separation-Training)@`1d4b3c4`(MIT). 가중치 라이선스는 게시자가 명시하지 않았습니다(“unknown”). 앱 저장소에는 가중치를 넣지 않습니다.
+- 구조: 앱이 44.1kHz STFT(2048/512, `torch.stft` 호환)·13.35초 청크·50% 겹침·선형 페이드 합성(MSST `demix`와 동일)을 수행하고, Core ML은 복소 마스크만 계산합니다(GPU, FP16).
+- 검증: PyTorch MSST 결과와 앱 출력이 실제 4분 팝 곡 30초 구간에서 49~52dB SNR로 일치. M5에서 4분 곡 약 100초(release), 메모리 약 0.7GB. Neural Engine 컴파일은 10분 이상 걸려 사용하지 않습니다.
+- 품질 한계: 같은 곡에서 베이스·드럼·보컬은 거의 제거되지만 피아노·기타 외 악기 일부가 남습니다. 비교 기준(다른 분리기의 기타 스템)도 정답이 아니므로 출시 품질 수치로 쓰지 않습니다. 텍스트 질의형 AudioSep은 같은 구간에서 원곡을 거의 그대로 통과시켜 채택하지 않았습니다.
 
 다성 음 후보 엔진(`BasicPitchTranscriber`)은 Spotify [Basic Pitch](https://github.com/spotify/basic-pitch)(Apache-2.0)의 ICASSP 2022 `nmp` Core ML 모델을 앱에 포함해 기기에서 실행합니다.
 L/R은 각각 따로 22,050Hz로 변환해 추론하며, 결과는 원곡 초 단위의 시작·끝, MIDI, 평균 활성도, 1/3반음 단위 피치 윤곽입니다. 활성도는 보정된 확률이 아니고 배음이 별도 음 후보로 나올 수 있습니다.
@@ -116,7 +127,7 @@ L/R 채널을 선택한 뒤 `코드·다성 후보 (Basic Pitch) · 현재 구�
 - 프로젝트별 작업 위치·보기 설정은 문서와 분리해 `~/Library/Application Support/RoughScore/WorkspaceSessions-v1`의 작은 원자적 JSON에 저장합니다. cursor, Guitar L/R, 원곡/스템, Stereo/L/R 채널, 구간 시작·확대, 재생 속도, 악보/구간 보기, 줄당 마디 수, 페이지·따라가기, 양쪽 lane·파형·음표 길이·박 스냅 표시, A–B 반복을 복원합니다. 문서 dirty·자동 저장·실행 취소·수동 TAB 시간/ID/nil은 바뀌지 않습니다. 재생은 일시 정지 상태로 열고 선택·입력 중 프렛·드래그·inspector는 초기화합니다.
 - 세션은 표준화한 프로젝트 절대 경로의 SHA-256 키와 제목·원곡 asset UUID(legacy v1은 audioPath)로 구분합니다. A/B 프로젝트는 독립적입니다. `다른 이름으로 저장`과 `사본 저장`은 현재 보기를 새 목적지에 복사하며, 사본은 활성 세션·문서 목적지를 바꾸지 않습니다. Finder에서 이름/위치를 바꾼 프로젝트는 새 경로의 기본 보기로 열립니다. 세션은 Mac 로컬 설정이며 패키지나 외부 오디오 안에 넣거나 함께 옮기지 않습니다.
 - 세션 v1 JSON은 최대 16KiB입니다. 누락·잘못된 JSON·지원하지 않는 버전·다른 문서의 기록은 안전한 기본값으로 열고, 시간/확대/페이지/반복은 현재 오디오 길이와 활성 asset의 레이아웃에 맞춥니다. 사용할 수 없거나 저장한 UUID와 다른 스템은 원곡으로 돌아갑니다. 보기 변경과 재생 tick은 1초 단위로 모아 저장하고, 프로젝트 전환·저장·종료 시 마지막 위치를 기록합니다. 세션 저장 실패는 하단 상태에 표시하며 이미 저장된 TAB, dirty, 실행 취소를 되돌리지 않습니다. 다른 파일·symlink·손상된 세션은 덮어쓰거나 자동 삭제하지 않습니다.
-- 온라인 서비스·외부 모델 다운로드는 없습니다. Apple 분석과 오디오 처리는 기기에서 수행됩니다.
+- 앱은 온라인 서비스를 쓰지 않습니다. 기타 분리 모델만 설치 스크립트가 한 번 내려받으며, 분석·분리·오디오 처리는 기기에서 수행됩니다.
 
 ## 검증
 
@@ -134,7 +145,9 @@ PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/delivery
 ## 소스
 
 - `Sources/RoughScoreCore/Project.swift`: 부분 TAB과 프로젝트 형식
-- `Sources/RoughScore/AudioServices.swift`: PCM 채널 추출, 파형, 데모, Apple 분석, 분리 모델 연결 지점
+- `Sources/RoughScore/AudioServices.swift`: PCM 채널 추출, 파형, 데모, Apple 분석
+- `Sources/RoughScoreCore/SpectralSeparator.swift`: `torch.stft` 호환 STFT/iSTFT와 청크 마스크 분리
+- `Sources/RoughScore/GuitarSeparator.swift`: 설치된 Core ML 기타 분리 모델 실행, 리샘플링, 분리 스템 저장
 - `Sources/RoughScore/BasicPitchTranscriber.swift`, `Sources/RoughScoreCore/BasicPitchDecoder.swift`: Basic Pitch 다성 음 후보 추론과 디코딩
 - `Sources/RoughScore/Workspace.swift`: 편집·재생·루프·저장 흐름
 - `Sources/RoughScore/WorkspaceView.swift`: 워크스페이스와 TAB 화면
