@@ -103,7 +103,9 @@ struct BulkActionButton: NSViewRepresentable {
         return button
     }
     func updateNSView(_ button: NSButton, context: Context) {
-        context.coordinator.action = action; button.isEnabled = enabled; button.title = title
+        context.coordinator.action = action
+        if button.isEnabled != enabled { button.isEnabled = enabled }
+        if button.title != title { button.title = title; button.setAccessibilityLabel(title) }
     }
     func sizeThatFits(_ proposal: ProposedViewSize, nsView: NSButton, context: Context) -> CGSize? {
         let size = nsView.intrinsicContentSize
@@ -126,28 +128,39 @@ struct BulkActionMenu: NSViewRepresentable {
     var symbol: String? = nil
     final class Coordinator: NSObject {
         var items: [Item] = []
+        /// Titles the current menu was built from; the menu is only rebuilt when they change.
+        var builtTitles: [String] = []
         @objc func invoke(_ sender: NSMenuItem) {
             guard items.indices.contains(sender.tag) else { return }; items[sender.tag].action()
         }
     }
     func makeCoordinator() -> Coordinator { Coordinator() }
-    func makeNSView(context: Context) -> NSPopUpButton { NSPopUpButton(frame: .zero, pullsDown: true) }
-    func updateNSView(_ button: NSPopUpButton, context: Context) {
-        context.coordinator.items = items
-        let menu = NSMenu()
-        let header = menu.addItem(withTitle: title, action: nil, keyEquivalent: "")
-        if let symbol { header.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil) }
-        for (index, item) in items.enumerated() {
-            let entry = NSMenuItem(title: item.title, action: #selector(Coordinator.invoke(_:)), keyEquivalent: "")
-            entry.tag = index; entry.target = context.coordinator; menu.addItem(entry)
-        }
-        button.menu = menu; button.isEnabled = enabled
+    /// Style is fixed at creation. Re-applying bezel/font/menu on every SwiftUI update re-measures
+    /// the button, and a toolbar re-lays out (visibly shifting its neighbours) each time.
+    func makeNSView(context: Context) -> NSPopUpButton {
+        let button = NSPopUpButton(frame: .zero, pullsDown: true)
         if prominent {
             button.bezelStyle = .toolbar; button.controlSize = .regular; button.font = .systemFont(ofSize: 12)
             button.imagePosition = symbol == nil ? .noImage : .imageLeading
-        }
-        else { button.font = .systemFont(ofSize: 10) }
+        } else { button.font = .systemFont(ofSize: 10) }
         button.identifier = NSUserInterfaceItemIdentifier(identifier); button.setAccessibilityLabel(title)
+        return button
+    }
+    func updateNSView(_ button: NSPopUpButton, context: Context) {
+        context.coordinator.items = items
+        let titles = [title] + items.map(\.title)
+        if context.coordinator.builtTitles != titles || button.menu == nil {
+            let menu = NSMenu()
+            let header = menu.addItem(withTitle: title, action: nil, keyEquivalent: "")
+            if let symbol { header.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil) }
+            for (index, item) in items.enumerated() {
+                let entry = NSMenuItem(title: item.title, action: #selector(Coordinator.invoke(_:)), keyEquivalent: "")
+                entry.tag = index; entry.target = context.coordinator; menu.addItem(entry)
+            }
+            button.menu = menu; context.coordinator.builtTitles = titles
+            button.setAccessibilityLabel(title)
+        }
+        if button.isEnabled != enabled { button.isEnabled = enabled }
     }
     func sizeThatFits(_ proposal: ProposedViewSize, nsView: NSPopUpButton, context: Context) -> CGSize? {
         nsView.intrinsicContentSize
