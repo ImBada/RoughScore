@@ -58,6 +58,7 @@ struct RoughScoreApp: App {
                 }
         }
         .defaultSize(width: 1440, height: 900)
+        .windowToolbarStyle(.unified(showsTitle: true))
         // Launching with a project file (Finder double-click or argv) otherwise suppresses the
         // default window, and the queued open request only starts once the window binds.
         .defaultLaunchBehavior(.presented)

@@ -1885,7 +1885,7 @@ final class Workspace: ObservableObject {
                 guard let self, !self.closed, self.projectIdentity == projectID else { return }
                 self.separationTask = nil; self.separationProgress = nil
                 guard let attach = self.attachStem(at: stem, offset: 0) else {
-                    self.status = "기타 분리 완료 · 다른 작업 중이라 연결하지 못했습니다. ‘스템 연결…’로 직접 연결하세요"
+                    self.status = "기타 분리 완료 · 다른 작업 중이라 연결하지 못했습니다. ‘스템 파일 연결…’로 직접 연결하세요"
                     return
                 }
                 if await attach.value { self.status = "기타 분리 완료 · 분리된 스템 연결됨 · TAB 변경 없음" }

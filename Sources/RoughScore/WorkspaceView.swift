@@ -3,13 +3,14 @@ import RoughScoreCore
 import SwiftUI
 
 enum Palette {
-    static let background = Color(red: 0.065, green: 0.078, blue: 0.085)
-    static let panel = Color(red: 0.09, green: 0.105, blue: 0.115)
-    static let elevated = Color(red: 0.12, green: 0.14, blue: 0.15)
-    static let mint = Color(red: 0.60, green: 0.89, blue: 0.72)
-    static let purple = Color(red: 0.73, green: 0.68, blue: 0.94)
-    static let secondary = Color(red: 0.56, green: 0.61, blue: 0.63)
-    static let border = Color.white.opacity(0.08)
+    static let background = Color(red: 0.078, green: 0.084, blue: 0.090)
+    static let panel = Color(red: 0.106, green: 0.113, blue: 0.121)
+    static let elevated = Color(red: 0.150, green: 0.158, blue: 0.168)
+    static let mint = Color(red: 0.55, green: 0.86, blue: 0.69)
+    static let purple = Color(red: 0.71, green: 0.66, blue: 0.95)
+    static let secondary = Color(red: 0.58, green: 0.61, blue: 0.64)
+    static let tertiary = Color(red: 0.40, green: 0.43, blue: 0.46)
+    static let border = Color.white.opacity(0.07)
 }
 
 func clockLabel(_ seconds: Double) -> String {
@@ -22,92 +23,79 @@ struct ProjectViewSetting<Value: Equatable>: Equatable {
     let value: Value
 }
 
+/// Source-list style group: a quiet caption over its rows.
+struct SidebarSection<Content: View>: View {
+    let title: String
+    @ViewBuilder let content: Content
+    init(_ title: String, @ViewBuilder content: () -> Content) { self.title = title; self.content = content() }
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(title).font(.system(size: 11, weight: .semibold)).foregroundStyle(Palette.tertiary)
+            content
+        }.frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+/// Icon-only toolbar button with a tooltip and a spoken label.
+struct ToolIcon: View {
+    let symbol: String
+    let label: String
+    var help: String? = nil
+    let action: () -> Void
+    var body: some View {
+        Button(action: action) { Image(systemName: symbol).frame(width: 24, height: 22) }
+            .buttonStyle(.borderless).accessibilityLabel(label).help(help ?? label)
+    }
+}
+
 struct WorkspaceView: View {
     @ObservedObject var workspace: Workspace
     @State private var noteListOpen = false
     @State private var tuningOpen = false
+    /// Width of the editing column; narrow layouts (inspector open, small window) drop secondary chrome.
+    @State private var mainWidth: CGFloat = 1200
+    private var compact: Bool { mainWidth < 820 }
     var body: some View {
         VStack(spacing: 0) {
-            topBar.disabled(!workspace.canEdit)
             if let message = workspace.externalOpenError {
                 HStack {
-                    Label(message, systemImage: "exclamationmark.triangle")
+                    Label(message, systemImage: "exclamationmark.triangle.fill").foregroundStyle(.orange)
                         .accessibilityIdentifier("external-project-open-error")
                     Spacer()
                     Button("닫기") { workspace.externalOpenError = nil }
-                }.font(.system(size: 12)).padding(10).background(Palette.panel)
-            }
-            Divider().overlay(Palette.border)
-            VStack(alignment: .leading, spacing: 4) {
-                Text(workspace.tabInputFocused ? "TAB 입력 · Tab 다음 음 · ⌃Tab 컨트롤로 · ⇧⌃Tab 뒤로" : "컨트롤 탐색 · Tab 이동 · TAB 입력 버튼 또는 ⌘Return으로 입력")
-                    .font(.system(size: 11)).accessibilityIdentifier("editor-input-mode")
-                HStack(spacing: 8) {
-                    Text("편집 커서 · 초").font(.system(size: 11))
-                    EditorNavigationControls(workspace: workspace, openNotes: { noteListOpen = true }, openTuning: { tuningOpen = true })
-                        .frame(width: 696, height: 32).id(workspace.editorIdentity)
-                    Spacer(minLength: 0)
-                }
-                Text("입력 간격은 표시 설정 오른쪽 초 필드 · 작은 악보 음은 음 목록에서 48pt 행으로 선택")
-                    .font(.system(size: 10)).foregroundStyle(Palette.secondary)
-            }.padding(.horizontal, 18).padding(.vertical, 6)
-                .popover(isPresented: $noteListOpen) {
-                    VStack(alignment: .leading) {
-                        Text("음 목록 · \(workspace.lane.title) · 원곡 시간순")
-                        AccessibleNoteList(workspace: workspace, events: workspace.project.events.filter { $0.lane == workspace.lane }.sorted {
-                            if $0.time != $1.time { return $0.time < $1.time }; return $0.id.uuidString < $1.id.uuidString
-                        }, dismiss: { noteListOpen = false })
-                            .frame(width: 660, height: 320)
-                        Button("닫기") { noteListOpen = false; _ = workspace.requestControlFocus?(false) }
-                    }.padding(12)
-                }
-                .popover(isPresented: $tuningOpen) {
-                    TuningEditor(workspace: workspace) { tuningOpen = false; _ = workspace.requestControlFocus?(false) }
-                }
-            if workspace.busy {
-                HStack {
-                    ProgressView(value: workspace.loadProgress).frame(maxWidth: 280)
-                    Text("오디오 준비 \(Int(workspace.loadProgress * 100))%")
-                    Spacer()
-                    Button("취소") { workspace.cancelLoading() }
-                }.font(.system(size: 12)).padding(12)
+                }.font(.system(size: 12)).padding(.horizontal, 14).padding(.vertical, 8).background(Palette.elevated)
+                Divider().overlay(Palette.border)
             }
             HStack(spacing: 0) {
-                sidebar.frame(width: 210)
+                sidebar.frame(width: 232)
                 Divider().overlay(Palette.border)
-                if workspace.scoreView {
-                    VStack(spacing: 12) {
-                        HStack {
-                            Text(workspace.project.title).font(.system(size: 22, weight: .medium)).lineLimit(1)
-                            Spacer()
-                            Text("\(clockLabel(workspace.project.duration)) · \(workspace.lane.title)")
-                                .font(.system(size: 11)).foregroundStyle(Palette.secondary)
+                VStack(spacing: 0) {
+                    transport
+                    Divider().overlay(Palette.border)
+                    editorBar
+                    Divider().overlay(Palette.border)
+                    if workspace.scoreView {
+                        ScoreSheetView(workspace: workspace).padding(16)
+                    } else {
+                        ScrollView {
+                            VStack(alignment: .leading, spacing: 20) {
+                                Slider(value: Binding(get: { workspace.cursor }, set: { workspace.seekForEditing($0, requestFocus: false) }),
+                                       in: 0...workspace.project.duration).controlSize(.small).accessibilityLabel("편집 커서 · 원곡 초")
+                                audioPanel
+                                tabPanel
+                                HStack(spacing: 22) {
+                                    Label("미채보 구간은 빈칸으로 유지", systemImage: "square.dashed")
+                                    Label("? 음 미확인", systemImage: "questionmark.circle")
+                                    Label("점선 잠정 프렛", systemImage: "circle.dashed")
+                                }.font(.system(size: 11)).foregroundStyle(Palette.secondary)
+                            }.padding(20)
                         }
-                        audioConnectionBar
-                        transport
-                        quickEditBar
-                        BulkSelectionBar(workspace: workspace)
-                        ScoreSheetView(workspace: workspace)
-                    }.padding(18)
-                } else { ScrollView {
-                    VStack(alignment: .leading, spacing: 22) {
-                        heading
-                        transport
-                        quickEditBar
-                        BulkSelectionBar(workspace: workspace)
-                        audioConnectionBar
-                        audioPanel
-                        tabPanel
-                        HStack(spacing: 22) {
-                            Label("미채보 구간은 빈칸으로 유지", systemImage: "square.dashed")
-                            Label("? 음 미확인", systemImage: "questionmark.circle")
-                            Label("점선 잠정 프렛", systemImage: "circle.dashed")
-                        }.font(.system(size: 11)).foregroundStyle(Palette.secondary)
-                        Spacer(minLength: 4)
-                    }.padding(26)
-                } }
+                    }
+                }.frame(minWidth: 0, maxWidth: .infinity, maxHeight: .infinity).clipped()
+                    .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { mainWidth = $0 }
                 if workspace.inspectorVisible {
                     Divider().overlay(Palette.border)
-                    NoteInspector(workspace: workspace).frame(width: 250).disabled(!workspace.canMutateNotes)
+                    NoteInspector(workspace: workspace).frame(width: 260).disabled(!workspace.canMutateNotes)
                 }
             }
             // Recreate project-scoped SwiftUI state/observers after activation. Otherwise old
@@ -115,20 +103,15 @@ struct WorkspaceView: View {
             .id(workspace.editorIdentity)
             .disabled(!workspace.canEdit)
             Divider().overlay(Palette.border)
-            HStack(spacing: 8) {
-                Circle().fill(workspace.busy || workspace.analyzing ? .orange : Palette.mint).frame(width: 5, height: 5)
-                Text(workspace.sessionPersistenceError ?? workspace.status).lineLimit(1)
-                    .help(workspace.sessionPersistenceError ?? workspace.status)
-                Spacer()
-                Text("LOCAL AUDIO  /  STANDARD E").tracking(1.4)
-            }
-            .font(.system(size: 10)).foregroundStyle(Palette.secondary)
-            .padding(.horizontal, 18).frame(height: 30).background(Palette.panel)
+            statusBar
         }
         .onChange(of: workspace.editorIdentity) { _, _ in noteListOpen = false; tuningOpen = false }
         .onChange(of: workspace.tabInputFocused) { _, focused in if focused { noteListOpen = false; tuningOpen = false } }
         .background(Palette.background).tint(Palette.mint)
         .background(TabKeyboardBridge(workspace: workspace).id(workspace.editorIdentity).allowsHitTesting(false))
+        .toolbar { toolbarContent }
+        .navigationTitle(workspace.project.title)
+        .navigationSubtitle(subtitle)
         .sheet(item: Binding(get: { workspace.exportSnapshot }, set: { if $0 == nil { workspace.cancelExport() } })) { snapshot in
             ScoreExportOptionsView(snapshot: snapshot, format: snapshot.initialFormat,
                 submit: { options in Task { _ = await workspace.completeExport(snapshot, options: options) } }, cancel: { workspace.cancelExport() })
@@ -138,29 +121,35 @@ struct WorkspaceView: View {
         } message: { Text(workspace.error ?? "") }
     }
 
-    private var topBar: some View {
-        HStack(spacing: 12) {
-            Image(systemName: "waveform.path").font(.system(size: 20, weight: .medium)).foregroundStyle(Palette.mint)
-            Text("roughscore").font(.system(size: 19, weight: .semibold, design: .rounded)).tracking(-0.5)
-            Text("SKETCH, THEN PLAY.").font(.system(size: 8, weight: .medium)).tracking(1.5).foregroundStyle(Palette.secondary)
-            Spacer()
-            Picker("보기", selection: $workspace.scoreView) {
-                Text("악보 보기").tag(true); Text("구간 편집").tag(false)
-            }.pickerStyle(.segmented).frame(width: 165)
-            if workspace.isDemo { Text("DEMO").font(.system(size: 9, weight: .bold)).tracking(1).padding(.horizontal, 9).padding(.vertical, 5).background(Palette.elevated, in: Capsule()) }
-            if workspace.dirty { Circle().fill(Palette.mint).frame(width: 6, height: 6) }
-            Button { workspace.importAudio() } label: { Label("오디오 열기", systemImage: "plus") }
-                .disabled(workspace.busy || workspace.analyzing)
-            Button { workspace.save() } label: { Label("저장", systemImage: "square.and.arrow.down") }.disabled(!workspace.canSave)
-            ProjectSaveMenu(workspace: workspace)
-            ScoreExportMenu(workspace: workspace)
-        }.buttonStyle(.borderless).font(.system(size: 12)).padding(.horizontal, 22).frame(height: 60)
-            .background(Palette.panel)
+    private var subtitle: String {
+        var parts = [clockLabel(workspace.project.duration), workspace.project.tuningDisplay]
+        if workspace.isDemo { parts.insert("데모", at: 0) }
+        if workspace.dirty { parts.append("편집됨") }
+        return parts.joined(separator: " · ")
     }
+
+    @ToolbarContentBuilder private var toolbarContent: some ToolbarContent {
+        ToolbarItem(placement: .principal) {
+            Picker("보기", selection: $workspace.scoreView) {
+                Label("악보", systemImage: "music.note.list").tag(true)
+                Label("구간 편집", systemImage: "waveform").tag(false)
+            }.pickerStyle(.segmented).labelStyle(.titleOnly).frame(width: 170).help("악보 보기 / 구간 편집")
+        }
+        ToolbarItemGroup(placement: .primaryAction) {
+            Button { workspace.importAudio() } label: { Label("오디오 열기", systemImage: "waveform.badge.plus") }
+                .help("오디오 열기 · ⌘O").disabled(workspace.busy || workspace.analyzing || !workspace.canEdit)
+            Button { workspace.save() } label: { Label("저장", systemImage: "square.and.arrow.down") }
+                .help("프로젝트 저장 · ⌘S").disabled(!workspace.canSave || !workspace.canEdit)
+            ProjectSaveMenu(workspace: workspace, prominent: true).disabled(!workspace.canEdit)
+            ScoreExportMenu(workspace: workspace, prominent: true).disabled(!workspace.canEdit)
+        }
+    }
+
+    // MARK: Sidebar
 
     /// Scrolls when its panels (L/R proposals, stem controls) outgrow the window; otherwise the
     /// whole window layout grows and pushes the top bar off screen. The min height keeps the
-    /// stem controls pinned to the bottom when everything fits.
+    /// footer pinned to the bottom when everything fits.
     private var sidebar: some View {
         GeometryReader { proxy in
             ScrollView(.vertical) {
@@ -171,78 +160,244 @@ struct WorkspaceView: View {
 
     private var sidebarContent: some View {
         VStack(alignment: .leading, spacing: 22) {
-            VStack(alignment: .leading, spacing: 8) {
-                overline("WORKSPACE")
-                Label("부분 채보", systemImage: "pencil.and.outline").font(.system(size: 13, weight: .medium))
-                Text("들리는 곳부터,\n확실한 음만 남기세요.")
-                    .font(.system(size: 11)).foregroundStyle(Palette.secondary).lineSpacing(4)
-            }
-            Divider()
-            VStack(alignment: .leading, spacing: 10) {
-                overline("TAB TRACKS")
-                ForEach(GuitarLane.allCases) { lane in
-                    Button {
-                        workspace.clearSelection(); workspace.lane = lane
-                        workspace.switchSource(lane == .left ? .left : .right)
-                    } label: {
-                        HStack(spacing: 10) {
-                            Text(lane == .left ? "L" : "R").font(.system(size: 11, weight: .bold)).frame(width: 25, height: 25)
-                                .background((lane == .left ? Palette.mint : Palette.purple).opacity(0.12), in: RoundedRectangle(cornerRadius: 6))
-                            VStack(alignment: .leading, spacing: 3) {
-                                Text(lane.title).font(.system(size: 12, weight: .medium))
-                                Text("\(workspace.project.events.filter { $0.lane == lane }.count)개 메모")
-                                    .font(.system(size: 10)).foregroundStyle(Palette.secondary)
-                            }
-                            Spacer()
-                            if workspace.lane == lane { Circle().fill(Palette.mint).frame(width: 5, height: 5) }
-                        }.padding(10).background(workspace.lane == lane ? Palette.elevated : .clear, in: RoundedRectangle(cornerRadius: 8))
-                    }.buttonStyle(.plain).accessibilityValue(workspace.lane == lane ? "선택됨" : "선택 안 됨")
+            SidebarSection("트랙") {
+                VStack(spacing: 2) {
+                    ForEach(GuitarLane.allCases) { lane in laneRow(lane) }
                 }
-                Text("L/R은 선택한 파일의 채널입니다.\n기타 파트 분리를 뜻하지 않습니다.")
-                    .font(.system(size: 10)).foregroundStyle(Palette.secondary).lineSpacing(3).fixedSize(horizontal: false, vertical: true)
+            }.help("L/R은 선택한 파일의 채널입니다. 기타 파트 분리를 뜻하지 않습니다.")
+            SidebarSection("오디오") {
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack {
+                        Text("원곡").font(.system(size: 12, weight: .medium))
+                        Spacer()
+                        Button("다시 연결…") { workspace.importAudio(relink: true) }
+                            .buttonStyle(.borderless).font(.system(size: 11)).disabled(!workspace.canLoad)
+                    }
+                    Text(workspace.audioConnection).font(.system(size: 10)).foregroundStyle(Palette.secondary)
+                        .lineLimit(2).fixedSize(horizontal: false, vertical: true)
+                }
+                StemControls(workspace: workspace)
             }
-            Divider()
-            VStack(alignment: .leading, spacing: 10) {
-                overline("MUSIC UNDERSTANDING")
-                metric("BPM", value: workspace.summary?.bpm.map { String(format: "%.1f", $0) } ?? "—")
-                metric("시작 조성", value: workspace.summary?.key ?? "—")
-                metric("박 / 구간", value: "\(workspace.summary?.beats.count ?? 0) / \(workspace.summary?.sections.count ?? 0)")
+            SidebarSection("분석") {
+                VStack(spacing: 6) {
+                    metric("BPM", value: workspace.summary?.bpm.map { String(format: "%.1f", $0) } ?? "—")
+                    metric("시작 조성", value: workspace.summary?.key ?? "—")
+                    metric("박 / 구간", value: "\(workspace.summary?.beats.count ?? 0) / \(workspace.summary?.sections.count ?? 0)")
+                }
                 if workspace.analyzing {
-                    ProgressView().controlSize(.small)
-                    Button("분석 취소") { workspace.cancelAnalysis() }.font(.system(size: 11))
+                    HStack(spacing: 8) {
+                        ProgressView().controlSize(.small)
+                        Button("분석 취소") { workspace.cancelAnalysis() }.controlSize(.small)
+                    }
                 } else {
-                    Button { workspace.analyze() } label: { Label("현재 소스 분석", systemImage: "sparkle") }
-                        .font(.system(size: 11)).disabled(!workspace.canAnalyze)
+                    Button { workspace.analyze() } label: { Label("현재 소스 분석", systemImage: "sparkles").frame(maxWidth: .infinity) }
+                        .controlSize(.small).disabled(!workspace.canAnalyze)
+                        .help("현재 자산의 Stereo · L · R 결과를 따로 보관합니다. 분석 결과는 TAB을 만들지 않습니다.")
                 }
-                Text("현재 자산의 Stereo · L · R 결과 보관\n분석 결과는 TAB을 생성하지 않습니다.")
-                    .font(.system(size: 10)).foregroundStyle(Palette.secondary).lineSpacing(3).fixedSize(horizontal: false, vertical: true)
             }
             if workspace.source != .stereo {
-                Group {
-                    Button("실험적 단음 후보 · 현재 구간") {
-                        workspace.proposePitches(from: workspace.windowStart,
-                            to: min(workspace.windowEnd, workspace.windowStart + 60))
-                    }
-                    Button("코드·다성 후보 · 현재 구간") {
-                        workspace.proposeChords(from: workspace.windowStart,
-                            to: min(workspace.windowEnd, workspace.windowStart + 60))
-                    }.help("Basic Pitch로 현재 구간의 코드·다성 음 후보를 찾습니다.")
-                }.font(.system(size: 10)).disabled(workspace.prepared == nil || workspace.analyzing || workspace.busy)
-                if !workspace.pitchProposals.isEmpty { proposalReview }
-                Text("단음은 깨끗한 단음용 · 코드 후보는 배음이 섞일 수 있음\n수락하면 잠정 음 · 리듬 없음")
-                    .font(.system(size: 9)).foregroundStyle(Palette.secondary).fixedSize(horizontal: false, vertical: true)
+                SidebarSection("음 후보 · \(workspace.source == .left ? "L" : "R")") {
+                    Group {
+                        Button { workspace.proposePitches(from: workspace.windowStart, to: min(workspace.windowEnd, workspace.windowStart + 60)) } label: {
+                            Text("실험적 단음 후보 · 현재 구간").frame(maxWidth: .infinity)
+                        }.help("깨끗한 단음용 · 수락하면 잠정 음, 리듬 없음")
+                        Button { workspace.proposeChords(from: workspace.windowStart, to: min(workspace.windowEnd, workspace.windowStart + 60)) } label: {
+                            Text("코드·다성 후보 · 현재 구간").frame(maxWidth: .infinity)
+                        }.help("Basic Pitch로 현재 구간의 코드·다성 음 후보를 찾습니다. 배음이 섞일 수 있습니다.")
+                    }.controlSize(.small).disabled(workspace.prepared == nil || workspace.analyzing || workspace.busy)
+                    if !workspace.pitchProposals.isEmpty { proposalReview }
+                }
             }
-            Spacer(minLength: 10)
-            StemControls(workspace: workspace)
+            Spacer(minLength: 0)
             HStack {
-                Button("프로젝트 열기") { workspace.openProject() }
+                Button { workspace.openProject() } label: { Label("프로젝트 열기", systemImage: "folder") }
                 Spacer()
                 Menu("데모") {
                     Button("짧은 데모 · 24초") { workspace.loadDemo() }
                     Button("긴 곡 데모 · 3분") { workspace.loadDemo(long: true) }
+                }.menuStyle(.borderlessButton).fixedSize()
+            }.font(.system(size: 11)).buttonStyle(.borderless).foregroundStyle(Palette.secondary)
+                .disabled(workspace.busy || workspace.analyzing)
+        }.padding(.horizontal, 14).padding(.vertical, 16)
+    }
+
+    private func laneRow(_ lane: GuitarLane) -> some View {
+        let selected = workspace.lane == lane
+        return Button {
+            workspace.clearSelection(); workspace.lane = lane
+            workspace.switchSource(lane == .left ? .left : .right)
+        } label: {
+            HStack(spacing: 10) {
+                RoundedRectangle(cornerRadius: 2).fill(lane == .left ? Palette.mint : Palette.purple).frame(width: 3, height: 16)
+                Text(lane.title).font(.system(size: 12, weight: selected ? .semibold : .regular))
+                Spacer()
+                Text("\(workspace.project.events.filter { $0.lane == lane }.count)")
+                    .font(.system(size: 11).monospacedDigit()).foregroundStyle(Palette.secondary)
+                    .accessibilityLabel("\(workspace.project.events.filter { $0.lane == lane }.count)개 메모")
+            }.padding(.horizontal, 8).frame(height: 28).contentShape(Rectangle())
+                .background(selected ? Palette.elevated : .clear, in: RoundedRectangle(cornerRadius: 6))
+        }.buttonStyle(.plain).accessibilityValue(selected ? "선택됨" : "선택 안 됨")
+    }
+
+    // MARK: Transport & editor bars
+
+    private var transport: some View {
+        HStack(spacing: 14) {
+            Button { workspace.togglePlayback() } label: {
+                Image(systemName: workspace.playing ? "pause.fill" : "play.fill")
+                    .font(.system(size: 13, weight: .semibold)).foregroundStyle(Palette.background)
+                    .frame(width: 32, height: 32).background(Palette.mint, in: Circle())
+            }.accessibilityLabel(workspace.playing ? "일시 정지" : "재생").buttonStyle(.plain)
+                .disabled(workspace.prepared == nil || workspace.busy).help("재생 / 일시 정지 · Space")
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Text(clockLabel(workspace.cursor)).font(.system(size: 19, weight: .medium, design: .monospaced))
+                if !compact {
+                    Text(clockLabel(workspace.project.duration)).font(.system(size: 11, design: .monospaced)).foregroundStyle(Palette.tertiary)
                 }
-            }.font(.system(size: 10)).buttonStyle(.borderless).disabled(workspace.busy || workspace.analyzing)
-        }.padding(18)
+            }.fixedSize()
+            Divider().frame(height: 20)
+            Picker("듣기", selection: Binding(get: { workspace.source }, set: { workspace.switchSource($0) })) {
+                Text("Stereo").tag(ListeningSource.stereo)
+                Text("L").tag(ListeningSource.left)
+                Text("R").tag(ListeningSource.right)
+            }.labelsHidden().pickerStyle(.segmented).frame(width: compact ? 120 : 150).disabled(workspace.busy)
+                .help("듣기 채널 · L/R은 원본 파일의 채널")
+            Picker("재생 속도", selection: $workspace.rate) {
+                Text("0.5×").tag(Float(0.5)); Text("0.75×").tag(Float(0.75)); Text("1×").tag(Float(1))
+            }.labelsHidden().frame(width: 68).help("재생 속도")
+            Divider().frame(height: 20)
+            HStack(spacing: 6) {
+                Toggle(isOn: $workspace.looping) { Image(systemName: "repeat") }.toggleStyle(.button)
+                    .accessibilityLabel("A–B 반복").accessibilityValue(workspace.looping ? "켜짐" : "꺼짐").help("A–B 반복")
+                Button(compact ? "A" : "A \(clockLabel(workspace.loopStart))") { workspace.setLoopStart() }
+                    .help("현재 위치를 반복 시작점으로 · [ · \(clockLabel(workspace.loopStart))")
+                Button(compact ? "B" : "B \(clockLabel(workspace.loopEnd))") { workspace.setLoopEnd() }
+                    .help("현재 위치를 반복 끝점으로 · ] · \(clockLabel(workspace.loopEnd))")
+            }.font(.system(size: 11, design: .monospaced)).fixedSize()
+            Spacer(minLength: 0)
+            if !compact { assetBadge }
+        }.controlSize(.small).padding(.horizontal, 16).frame(height: 54).background(Palette.panel)
+    }
+
+    private var assetBadge: some View {
+        Text(workspace.assetRole == .original ? "원곡" : "기타 스템")
+            .font(.system(size: 10, weight: .semibold)).foregroundStyle(workspace.assetRole == .original ? Palette.secondary : Palette.mint)
+            .padding(.horizontal, 8).padding(.vertical, 3)
+            .background((workspace.assetRole == .original ? Palette.elevated : Palette.mint.opacity(0.14)), in: Capsule())
+            .help(workspace.assetRole == .original ? workspace.audioConnection : workspace.stemConnection)
+    }
+
+    /// Native navigation row (Tab/⌃Tab focus loop) + note tools + selection actions.
+    private var editorBar: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 10) {
+                if !compact { inputModeBadge }
+                EditorNavigationControls(workspace: workspace, openNotes: { noteListOpen = true }, openTuning: { tuningOpen = true })
+                    .frame(width: EditorNavigationView.preferredWidth, height: 24).id(workspace.editorIdentity)
+                    .popover(isPresented: $noteListOpen) {
+                        VStack(alignment: .leading) {
+                            Text("음 목록 · \(workspace.lane.title) · 원곡 시간순")
+                            AccessibleNoteList(workspace: workspace, events: workspace.project.events.filter { $0.lane == workspace.lane }.sorted {
+                                if $0.time != $1.time { return $0.time < $1.time }; return $0.id.uuidString < $1.id.uuidString
+                            }, dismiss: { noteListOpen = false })
+                                .frame(width: 660, height: 320)
+                            Button("닫기") { noteListOpen = false; _ = workspace.requestControlFocus?(false) }
+                        }.padding(12)
+                    }
+                    .popover(isPresented: $tuningOpen) {
+                        TuningEditor(workspace: workspace) { tuningOpen = false; _ = workspace.requestControlFocus?(false) }
+                    }
+                Spacer(minLength: 0)
+                if !compact { historyTools }
+            }.padding(.horizontal, 14).frame(height: 40)
+            HStack(spacing: 10) {
+                quickEditInfo.layoutPriority(-1)
+                Spacer(minLength: 8)
+                quickEditTools.fixedSize()
+                if compact { Divider().frame(height: 16); historyTools.fixedSize() }
+            }.padding(.horizontal, 14).frame(height: 30).disabled(!workspace.canEdit)
+            BulkSelectionBar(workspace: workspace).padding(.horizontal, 14).frame(height: 28).disabled(!workspace.canEdit)
+        }.background(Palette.panel.opacity(0.55))
+    }
+
+    private var historyTools: some View {
+        HStack(spacing: 4) {
+            ToolIcon(symbol: "arrow.uturn.backward", label: "실행 취소", help: "실행 취소 · ⌘Z") { workspace.performUndo() }
+                .disabled(!workspace.canPerformUndo)
+            ToolIcon(symbol: "arrow.uturn.forward", label: "다시 실행", help: "다시 실행 · ⇧⌘Z") { workspace.performRedo() }
+                .disabled(!workspace.canPerformRedo)
+            Divider().frame(height: 16).padding(.horizontal, 2)
+            Toggle(isOn: $workspace.inspectorVisible) { Image(systemName: "sidebar.right") }
+                .toggleStyle(.button).buttonStyle(.borderless).accessibilityLabel("상세").help("상세 편집 패널 · I")
+        }.disabled(!workspace.canEdit)
+    }
+
+    private var inputModeBadge: some View {
+        Label(workspace.tabInputFocused ? "입력 중" : "탐색", systemImage: "keyboard")
+            .font(.system(size: 10, weight: .semibold)).labelStyle(.titleAndIcon)
+            .foregroundStyle(workspace.tabInputFocused ? Palette.mint : Palette.secondary)
+            .padding(.horizontal, 7).padding(.vertical, 3)
+            .background(workspace.tabInputFocused ? Palette.mint.opacity(0.14) : Palette.elevated, in: Capsule())
+            .fixedSize()
+            .help(workspace.tabInputFocused ? "TAB 입력 · Tab 다음 음 · ⌃Tab 컨트롤로 · ⇧⌃Tab 뒤로"
+                  : "컨트롤 탐색 · Tab 이동 · TAB 입력 버튼 또는 ⌘Return으로 입력. 입력 간격은 표시 설정 오른쪽 초 필드")
+            .accessibilityIdentifier("editor-input-mode")
+    }
+
+    @ViewBuilder private var quickEditInfo: some View {
+        if let selected = workspace.selected {
+            let shown = workspace.renderedEvent(selected)
+            HStack(spacing: 6) {
+                Text("\(shown.string)번 줄").foregroundStyle(Palette.mint).monospacedDigit()
+                PositionTimeField(workspace: workspace, event: shown).id(selected.id)
+                Text("초 · \(shown.fret.map { "\($0)프렛" } ?? "? 프렛")").foregroundStyle(Palette.mint)
+            }.font(.system(size: 11)).help("자유 드래그 · Shift 마그넷 · 더블 클릭 확대")
+        } else {
+            Text("줄 클릭 후 숫자로 프렛 입력 · ↑↓ \(workspace.activeString)번 줄 · 파형 드래그로 반복")
+                .font(.system(size: 11)).foregroundStyle(Palette.tertiary).lineLimit(1)
+        }
+    }
+
+    private var quickEditTools: some View {
+        HStack(spacing: 4) {
+            ToolIcon(symbol: "plus.magnifyingglass", label: "선택한 음 주변 2초 확대", help: "선택한 음 주변 2초 확대 · 더블 클릭") { workspace.focusSelectedForPosition() }
+                .disabled(workspace.selected == nil)
+            ToolIcon(symbol: "speaker.wave.2", label: "선택한 위치부터 듣기", help: "선택한 위치부터 듣기 · Shift+Space") { workspace.auditionSelected() }
+                .disabled(workspace.selected == nil)
+            ToolIcon(symbol: "trash", label: "선택한 음 삭제", help: "선택한 음 삭제 · Delete") { workspace.deleteSelected() }
+                .disabled(workspace.selected == nil)
+            Divider().frame(height: 16).padding(.horizontal, 4)
+            Toggle("박 스냅", isOn: $workspace.snapToBeat).toggleStyle(.checkbox).font(.system(size: 11))
+                .accessibilityLabel("새 음 박 스냅")
+                .help("새 음 입력을 분석된 박에 맞춥니다 · 이동은 자유 드래그, Shift로 가까운 음에 정렬")
+                .disabled(workspace.scoreSummary?.beats.isEmpty ?? true)
+            Button("다음 +\(Int(workspace.entryInterval * 1000))ms") { workspace.advanceEntry() }
+                .controlSize(.small).disabled(!workspace.canMutateNotes).help("선택을 마치고 지정한 간격만큼 커서를 이동 · Enter")
+            EntryIntervalControl(workspace: workspace)
+        }
+    }
+
+    private var statusBar: some View {
+        HStack(spacing: 8) {
+            if workspace.busy {
+                ProgressView(value: workspace.loadProgress).controlSize(.small).frame(width: 140)
+                Text("오디오 준비 \(Int(workspace.loadProgress * 100))%").monospacedDigit()
+                Button("취소") { workspace.cancelLoading() }.buttonStyle(.borderless).font(.system(size: 11))
+                Divider().frame(height: 12)
+            } else {
+                Circle().fill(workspace.analyzing ? .orange : Palette.mint).frame(width: 6, height: 6)
+            }
+            Text(workspace.sessionPersistenceError ?? workspace.status).lineLimit(1)
+                .help(workspace.sessionPersistenceError ?? workspace.status)
+            Spacer()
+            Text(workspace.saveState.title)
+            Divider().frame(height: 12)
+            Text(workspace.lane.title)
+            Divider().frame(height: 12)
+            Text(workspace.project.tuningDisplay).lineLimit(1)
+        }
+        .font(.system(size: 11)).foregroundStyle(Palette.secondary)
+        .padding(.horizontal, 14).frame(height: 26).background(Palette.panel)
     }
 
     /// Click a row to move the cursor to its onset; 수락 inserts one tentative note (⌘Z undoes it).
@@ -283,153 +438,56 @@ struct WorkspaceView: View {
         }.padding(6).background(Palette.elevated, in: RoundedRectangle(cornerRadius: 6))
     }
 
-    private var heading: some View {
-        HStack(alignment: .top) {
-            VStack(alignment: .leading, spacing: 8) {
-                overline("A WORKING TRANSCRIPTION")
-                Text(workspace.project.title).font(.system(size: 28, weight: .medium)).tracking(-0.8).lineLimit(1)
-                Text(workspace.isDemo ? "합성 스테레오 예시 · 왼쪽 리프 / 오른쪽 멜로디" : "\(clockLabel(workspace.project.duration)) · 로컬 오디오")
-                    .font(.system(size: 11)).foregroundStyle(Palette.secondary)
-                TuningControl(workspace: workspace)
-            }
-            Spacer()
-            Text("ROUGH\nIS ENOUGH.").font(.system(size: 10, weight: .medium, design: .monospaced)).tracking(1.5)
-                .lineSpacing(4).foregroundStyle(Palette.mint.opacity(0.7))
-        }
-    }
-
-    private var transport: some View {
-        VStack(spacing: 14) {
-            HStack(spacing: 14) {
-                Button { workspace.togglePlayback() } label: {
-                    Image(systemName: workspace.playing ? "pause.fill" : "play.fill")
-                        .font(.system(size: 16)).foregroundStyle(Palette.background).frame(width: 40, height: 40)
-                        .background(Palette.mint, in: RoundedRectangle(cornerRadius: 10))
-                }.accessibilityLabel(workspace.playing ? "일시 정지" : "재생").buttonStyle(.plain).disabled(workspace.prepared == nil || workspace.busy)
-                Text(clockLabel(workspace.cursor)).font(.system(size: 17, weight: .medium, design: .monospaced))
-                Text("/ \(clockLabel(workspace.project.duration))").font(.system(size: 11, design: .monospaced)).foregroundStyle(Palette.secondary)
-                Spacer(minLength: 0)
-                Picker("듣기", selection: Binding(get: { workspace.source }, set: { workspace.switchSource($0) })) {
-                    Text("Stereo · S").tag(ListeningSource.stereo)
-                    Text("L").tag(ListeningSource.left)
-                    Text("R").tag(ListeningSource.right)
-                }.labelsHidden().pickerStyle(.segmented).frame(width: 190).disabled(workspace.busy)
-                Picker("재생 속도", selection: $workspace.rate) {
-                    Text("0.5×").tag(Float(0.5)); Text("0.75×").tag(Float(0.75)); Text("1×").tag(Float(1))
-                }.labelsHidden().frame(width: 70)
-                Toggle(isOn: $workspace.looping) { Image(systemName: "repeat") }.toggleStyle(.button).accessibilityLabel("A–B 반복").accessibilityValue(workspace.looping ? "켜짐" : "꺼짐").help("A–B 반복")
-                Button("A \(clockLabel(workspace.loopStart))") { workspace.setLoopStart() }.help("현재 위치를 반복 시작점으로")
-                Button("B \(clockLabel(workspace.loopEnd))") { workspace.setLoopEnd() }.help("현재 위치를 반복 끝점으로")
-            }.font(.system(size: 10, design: .monospaced))
-            if !workspace.scoreView {
-                Slider(value: Binding(get: { workspace.cursor }, set: { workspace.seekForEditing($0, requestFocus: false) }), in: 0...workspace.project.duration).accessibilityLabel("편집 커서 · 원곡 초")
-            }
-        }.padding(workspace.scoreView ? 10 : 16).background(Palette.panel, in: RoundedRectangle(cornerRadius: 12))
-    }
-
-    private var quickEditBar: some View {
-        HStack(spacing: 12) {
-            if let selected = workspace.selected {
-                let shown = workspace.renderedEvent(selected)
-                Text("\(shown.string)번 줄 ·")
-                    .foregroundStyle(Palette.mint).monospacedDigit()
-                PositionTimeField(workspace: workspace, event: shown).id(selected.id)
-                Text("초 · \(shown.fret.map(String.init) ?? "?")프렛").foregroundStyle(Palette.mint)
-                Text("자유 드래그 · Shift 마그넷 · 더블 클릭 확대")
-                    .foregroundStyle(Palette.secondary).lineLimit(1)
-            } else {
-                Text("클릭 후 숫자 입력 · ↑↓ \(workspace.activeString)번 줄 · 파형 드래그로 반복")
-                    .foregroundStyle(Palette.secondary).lineLimit(1)
-            }
-            Spacer(minLength: 0)
-            Button { workspace.focusSelectedForPosition() } label: { Image(systemName: "plus.magnifyingglass") }
-                .disabled(workspace.selected == nil).accessibilityLabel("선택한 음 주변 2초 확대").help("선택한 음 주변 2초 확대 · 더블 클릭")
-            Button { workspace.auditionSelected() } label: { Image(systemName: "speaker.wave.1") }
-                .disabled(workspace.selected == nil).accessibilityLabel("선택한 위치부터 듣기").help("선택한 위치부터 듣기 · Shift+Space")
-            Toggle("새 음 박 스냅", isOn: $workspace.snapToBeat).toggleStyle(.checkbox)
-                .help("새 음 입력에 적용 · 이동은 자유 드래그, Shift로 가까운 음에 정렬")
-                .disabled(workspace.scoreSummary?.beats.isEmpty ?? true)
-            Button { workspace.performUndo() } label: { Image(systemName: "arrow.uturn.backward") }.disabled(!workspace.canPerformUndo).accessibilityLabel("실행 취소").help("실행 취소 · ⌘Z")
-            Button { workspace.performRedo() } label: { Image(systemName: "arrow.uturn.forward") }.disabled(!workspace.canPerformRedo).accessibilityLabel("다시 실행").help("다시 실행 · ⇧⌘Z")
-            Button { workspace.deleteSelected() } label: { Image(systemName: "trash") }.disabled(workspace.selected == nil).accessibilityLabel("선택한 음 삭제").help("선택한 음 삭제 · Delete")
-            Toggle("상세", isOn: $workspace.inspectorVisible).toggleStyle(.button).help("상세 편집 · I")
-            Button("다음 +\(Int(workspace.entryInterval * 1000))ms ↵") { workspace.advanceEntry() }
-                .disabled(!workspace.canMutateNotes).help("선택을 마치고 지정한 간격만큼 커서를 이동 · Enter")
-            EntryIntervalControl(workspace: workspace)
-            Text(workspace.saveState.title).font(.system(size: 9)).foregroundStyle(Palette.secondary)
-        }.font(.system(size: 10)).buttonStyle(.borderless).frame(height: 27)
-    }
-
-    private var audioConnectionBar: some View {
-        HStack {
-            Text((workspace.assetRole == .original ? "원곡 · " : "Stem · ") + (workspace.assetRole == .original ? workspace.audioConnection : workspace.stemConnection)).lineLimit(1).foregroundStyle(Palette.secondary)
-            Spacer()
-            Button("원곡 다시 연결…") { workspace.importAudio(relink: true) }
-                .disabled(!workspace.canLoad)
-        }.font(.system(size: 10)).buttonStyle(.borderless)
-    }
-
     private var audioPanel: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(alignment: .leading, spacing: 10) {
             HStack {
-                Text("01").foregroundStyle(Palette.mint)
-                Text("듣고, 위치 찾기").fontWeight(.medium)
+                Text("파형").font(.system(size: 12, weight: .semibold))
                 Spacer()
-                Picker("듣기 소스", selection: Binding(get: { workspace.source }, set: { workspace.switchSource($0) })) {
-                    ForEach(ListeningSource.allCases) { Text($0.title).tag($0) }
-                }.labelsHidden().pickerStyle(.segmented).frame(width: 265)
-                    .disabled(workspace.busy)
-            }.font(.system(size: 12))
-            WaveformView(workspace: workspace)
-            HStack {
-                Text("파형을 클릭해서 이동").foregroundStyle(Palette.secondary)
-                Spacer()
-                Text("L / R · 원본 채널").foregroundStyle(Palette.secondary)
-            }.font(.system(size: 10))
+                Text("L / R · 원본 채널").font(.system(size: 10)).foregroundStyle(Palette.tertiary)
+            }
+            WaveformView(workspace: workspace).help("클릭해서 이동 · 드래그해서 반복 구간 지정")
         }
     }
 
     private var tabPanel: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack(spacing: 12) {
-                Text("02").foregroundStyle(Palette.mint)
-                Text("\(workspace.lane.title) · 부분 TAB").fontWeight(.medium)
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 10) {
+                Text("\(workspace.lane.title) · TAB").font(.system(size: 12, weight: .semibold))
+                Text("\(clockLabel(workspace.windowStart)) — \(clockLabel(workspace.windowEnd))")
+                    .font(.system(size: 10, design: .monospaced)).foregroundStyle(Palette.tertiary)
                 Spacer()
-                Toggle("새 음 박 스냅", isOn: $workspace.snapToBeat).disabled(workspace.scoreSummary?.beats.isEmpty ?? true)
-                Toggle("음표 길이", isOn: $workspace.showLengths)
-            }.font(.system(size: 12)).toggleStyle(.checkbox)
-            HStack {
-                Text("\(clockLabel(workspace.windowStart)) — \(clockLabel(workspace.windowEnd))").font(.system(size: 10, design: .monospaced)).foregroundStyle(Palette.secondary)
-                Spacer()
+                Toggle("음표 길이", isOn: $workspace.showLengths).toggleStyle(.checkbox).font(.system(size: 11))
                 Picker("표시 범위", selection: $workspace.windowLength) {
                     if ![1.0, 2.0, 3.0, 6.0, 12.0, 24.0, 48.0].contains(workspace.windowLength) {
                         Text("현재 범위").tag(workspace.windowLength)
                     }
                     Text("1초").tag(1.0); Text("2초").tag(2.0); Text("3초").tag(3.0)
                     Text("6초").tag(6.0); Text("12초").tag(12.0); Text("24초").tag(24.0); Text("48초").tag(48.0)
-                }.labelsHidden().frame(width: 75)
+                }.labelsHidden().frame(width: 76)
                     .onChange(of: ProjectViewSetting(projectID: workspace.editorIdentity, value: workspace.windowLength)) { previous, current in
                         guard previous.projectID == current.projectID else { return }
                         workspace.zoomPositionWindow(by: 1)
                     }
-                Button { workspace.zoomPositionWindow(by: 0.5) } label: { Image(systemName: "plus.magnifyingglass") }.help("음 주변 확대")
-                Button { workspace.zoomPositionWindow(by: 2) } label: { Image(systemName: "minus.magnifyingglass") }.help("음 주변 축소")
-                Button { workspace.moveWindow(-1) } label: { Image(systemName: "chevron.left") }.help("이전 구간")
-                Button { workspace.moveWindow(1) } label: { Image(systemName: "chevron.right") }.help("다음 구간")
-            }
+                HStack(spacing: 2) {
+                    ToolIcon(symbol: "plus.magnifyingglass", label: "음 주변 확대") { workspace.zoomPositionWindow(by: 0.5) }
+                    ToolIcon(symbol: "minus.magnifyingglass", label: "음 주변 축소") { workspace.zoomPositionWindow(by: 2) }
+                    ToolIcon(symbol: "chevron.left", label: "이전 구간") { workspace.moveWindow(-1) }
+                    ToolIcon(symbol: "chevron.right", label: "다음 구간") { workspace.moveWindow(1) }
+                }
+            }.controlSize(.small)
             TabCanvas(workspace: workspace).frame(height: workspace.showLengths ? 308 : 275)
-                .background(Palette.panel, in: RoundedRectangle(cornerRadius: 12))
+                .background(Palette.panel, in: RoundedRectangle(cornerRadius: 10))
+                .overlay(RoundedRectangle(cornerRadius: 10).stroke(Palette.border))
+                .help("줄 클릭 후 숫자로 프렛 입력 · 파형 드래그로 반복 듣기")
             HStack {
-                Image(systemName: "cursorarrow.click")
-                Text("줄 클릭 후 숫자로 프렛 입력 · 파형 드래그로 반복 듣기")
                 Spacer()
-                Text("\(workspace.visibleEvents.count) NOTES")
-            }.font(.system(size: 10)).foregroundStyle(Palette.secondary)
+                Text("\(workspace.visibleEvents.count)개 음").font(.system(size: 10)).foregroundStyle(Palette.tertiary)
+            }
         }
     }
 
     private func metric(_ label: String, value: String) -> some View {
-        HStack { Text(label).foregroundStyle(Palette.secondary); Spacer(); Text(value).lineLimit(1) }.font(.system(size: 11))
+        HStack { Text(label).foregroundStyle(Palette.secondary); Spacer(); Text(value).monospacedDigit().lineLimit(1) }.font(.system(size: 12))
     }
 }
 
@@ -498,7 +556,8 @@ struct WaveformView: View {
                 else { workspace.seekForEditing(time(at: value.location.x, width: geometry.size.width)) }
                 dragRange = nil
             })
-        }.overlay(EditingCursorAXSurface(workspace: workspace, name: "파형")).frame(height: 115).padding(10).background(Palette.panel, in: RoundedRectangle(cornerRadius: 12))
+        }.overlay(EditingCursorAXSurface(workspace: workspace, name: "파형")).frame(height: 115).padding(10)
+            .background(Palette.panel, in: RoundedRectangle(cornerRadius: 10)).overlay(RoundedRectangle(cornerRadius: 10).stroke(Palette.border))
     }
     private func time(at x: Double, width: Double) -> Double {
         let fraction = min(1, max(0, (x - 38) / (width - 58)))
@@ -610,7 +669,7 @@ struct NoteInspector: View {
         ScrollView {
         VStack(alignment: .leading, spacing: 20) {
             HStack {
-                overline("NOTE INSPECTOR")
+                Text("음 상세").font(.system(size: 13, weight: .semibold))
                 Spacer()
                 Button { workspace.inspectorVisible = false; workspace.requestKeyboardFocus?() } label: { Image(systemName: "xmark") }
                     .buttonStyle(.plain).font(.system(size: 10)).help("편집 패널 닫기")
@@ -661,14 +720,16 @@ struct NoteInspector: View {
                 Button(role: .destructive) { workspace.deleteSelected() } label: { Label("이 메모 삭제", systemImage: "trash") }.font(.system(size: 11))
                 Spacer()
             } else {
-                Image(systemName: "pencil.tip.crop.circle").font(.system(size: 34, weight: .ultraLight)).foregroundStyle(Palette.secondary).padding(.top, 28)
-                Text("한 음씩,\n천천히 기록하세요.").font(.system(size: 19, weight: .medium)).lineSpacing(5)
-                Text("TAB의 줄 위를 클릭하면\n그 위치에 메모가 생깁니다.\n\n프렛을 모르면 ?로 두고,\n들리는 부분만 적어도 됩니다.")
-                    .font(.system(size: 11)).foregroundStyle(Palette.secondary).lineSpacing(5)
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("선택한 음 없음").font(.system(size: 13, weight: .medium))
+                    Text("TAB 줄을 클릭하면 그 위치에 음이 생깁니다. 프렛을 모르면 ?로 두고 들리는 부분만 적어도 됩니다.")
+                        .font(.system(size: 11)).foregroundStyle(Palette.secondary).lineSpacing(3)
+                        .fixedSize(horizontal: false, vertical: true)
+                }.padding(.top, 4)
                 Spacer()
             }
             VStack(alignment: .leading, spacing: 9) {
-                overline("QUICK GUIDE")
+                Text("단축키").font(.system(size: 11, weight: .semibold)).foregroundStyle(Palette.tertiary)
                 shortcut("0–24", "프렛 바로 입력")
                 shortcut("↑ ↓", "줄 이동")
                 shortcut("← →", "시간 ±50ms")

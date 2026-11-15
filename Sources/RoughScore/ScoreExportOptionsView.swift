@@ -88,8 +88,10 @@ struct ScoreExportCommands: View {
 }
 struct ScoreExportMenu: View {
     @ObservedObject var workspace: Workspace
+    var prominent = false
     var body: some View {
         BulkActionMenu(title: "내보내기", identifier: "score-export-menu", enabled: workspace.canExport,
-            items: ScoreExportFormat.allCases.map { format in .init(title: format.title + "…", action: { workspace.beginExport(format) }) })
+            items: ScoreExportFormat.allCases.map { format in .init(title: format.title + "…", action: { workspace.beginExport(format) }) },
+            prominent: prominent, symbol: prominent ? "square.and.arrow.up" : nil)
     }
 }
