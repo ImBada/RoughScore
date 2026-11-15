@@ -111,7 +111,7 @@ final class EditorNavigationView: NSView, NSTextFieldDelegate {
         field(cursorField, "편집 커서 · 원곡 초", "editing-cursor")
         field(intervalField, "입력 간격 · 초", "entry-interval")
         for (button, title, id) in [(input, "TAB 입력 ⌘↵", "tab-input"), (notes, "음 목록…", "note-list"), (tuning, "튜닝 / 카포…", "editor-tuning")] {
-            button.title = title; button.bezelStyle = .push; button.controlSize = .small; button.font = .systemFont(ofSize: 11)
+            button.title = title; button.bezelStyle = .accessoryBarAction; button.controlSize = .small; button.font = .systemFont(ofSize: 11)
             button.target = button; button.action = #selector(EditorNavigationButton.run(_:))
             button.navigation = self; button.identifier = .init(id); button.setAccessibilityLabel(title)
             addSubview(button)
@@ -121,6 +121,7 @@ final class EditorNavigationView: NSView, NSTextFieldDelegate {
         tuning.invoke = { [weak self] in guard self?.live?.canMutateNotes == true else { return }; self?.openTuning?() }
         settings.navigation = self; settings.identifier = .init("editor-display-settings")
         settings.setAccessibilityLabel("표시 설정"); settings.controlSize = .small; settings.font = .systemFont(ofSize: 11)
+        settings.bezelStyle = .accessoryBarAction
         addSubview(settings)
         // Real named key views; bridge escape uses the endpoints below.
         for (index, control) in controls.enumerated() { control.nextKeyView = controls[(index + 1) % controls.count] }
@@ -169,7 +170,8 @@ final class EditorNavigationView: NSView, NSTextFieldDelegate {
             (4, "재생 따라가기", true, workspace.followScore), (5, "한 줄 4 / 8마디", true, workspace.measuresPerSystem == 8),
             (6, "페이지 맞춤 전환", workspace.scoreView && workspace.requestScoreFitPageToggle != nil, false),
             (7, "이전 악보 페이지", workspace.scoreView && workspace.displayedScorePage > 0, false),
-            (8, "다음 악보 페이지", workspace.scoreView && workspace.displayedScorePage < workspace.scoreLayout.pageCount - 1, false)] {
+            (8, "다음 악보 페이지", workspace.scoreView && workspace.displayedScorePage < workspace.scoreLayout.pageCount - 1, false),
+            (9, "새 음 박 스냅", !(workspace.scoreSummary?.beats.isEmpty ?? true), workspace.snapToBeat)] {
             let item = NSMenuItem(title: title, action: #selector(setting(_:)), keyEquivalent: "")
             item.tag = index; item.target = self; item.isEnabled = enabled; item.state = checked ? .on : .off; menu.addItem(item)
         }
@@ -187,6 +189,7 @@ final class EditorNavigationView: NSView, NSTextFieldDelegate {
         case 6: workspace.requestScoreFitPageToggle?()
         case 7: workspace.browseScorePage(workspace.displayedScorePage - 1)
         case 8: workspace.browseScorePage(workspace.displayedScorePage + 1)
+        case 9: workspace.snapToBeat.toggle()
         default: break
         }
     }
