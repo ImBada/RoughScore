@@ -3,31 +3,42 @@ import RoughScoreCore
 import SwiftUI
 
 /// Small optional tools beside sparse entry. Every action uses the Workspace transaction owner.
+/// Picks every note of the current lane in a typed time range.
+struct RangeSelectionButton: View {
+    @ObservedObject var workspace: Workspace
+    @State private var open = false
+    @State private var start = 0.0
+    @State private var end = 1.0
+    var body: some View {
+        Button("구간 선택…") {
+            start = workspace.windowStart; end = workspace.windowEnd; open = true
+        }.help("⌘클릭: 선택 추가/해제 · ⌘드래그: 현재 기타 구간 선택 · ⌘클릭 빈 곳: 커서 이동 · ⌘C/V/D: 복사/붙여넣기/복제")
+        .popover(isPresented: $open) {
+            VStack(alignment: .leading) {
+                Text("\(workspace.lane.title) · 시작 포함 / 끝 제외")
+                HStack {
+                    TextField("선택 시작 · 초", value: $start, format: .number).frame(width: 95)
+                    Text("—")
+                    TextField("선택 끝 · 초", value: $end, format: .number).frame(width: 95)
+                    Button("선택") {
+                        if workspace.selectRange(lane: workspace.lane, from: start, to: end) { open = false }
+                    }
+                }
+            }.padding(12)
+        }
+    }
+}
+
 struct BulkSelectionBar: View {
     @ObservedObject var workspace: Workspace
+    /// Floating selection bar: actions only, without the range picker and idle hint.
+    var hud = false
     @State private var offsetOpen = false
-    @State private var rangeOpen = false
     @State private var offset = 0.0
-    @State private var rangeStart = 0.0
-    @State private var rangeEnd = 1.0
     var body: some View {
         HStack(spacing: 10) {
             Text("\(workspace.selectedIDs.count)개 선택").monospacedDigit()
-            Button("구간 선택…") {
-                rangeStart = workspace.windowStart; rangeEnd = workspace.windowEnd; rangeOpen = true
-            }.popover(isPresented: $rangeOpen) {
-                VStack(alignment: .leading) {
-                    Text("\(workspace.lane.title) · 시작 포함 / 끝 제외")
-                    HStack {
-                        TextField("선택 시작 · 초", value: $rangeStart, format: .number).frame(width: 95)
-                        Text("—")
-                        TextField("선택 끝 · 초", value: $rangeEnd, format: .number).frame(width: 95)
-                        Button("선택") {
-                            if workspace.selectRange(lane: workspace.lane, from: rangeStart, to: rangeEnd) { rangeOpen = false }
-                        }
-                    }
-                }.padding(12)
-            }
+            if !hud { RangeSelectionButton(workspace: workspace) }
             if !workspace.selectedIDs.isEmpty {
                 BulkActionButton(title: "커서에 복제", identifier: "bulk-duplicate", enabled: workspace.canEditSelection) {
                     _ = workspace.duplicateSelection()
@@ -55,11 +66,13 @@ struct BulkSelectionBar: View {
                     workspace.deleteSelected()
                 }
             }
-            Spacer(minLength: 0)
-            if workspace.selectedIDs.isEmpty {
-                Text("⌘클릭 추가 · ⌘드래그 구간 · ⌘C/V/D").foregroundStyle(Palette.tertiary).lineLimit(1)
+            if !hud {
+                Spacer(minLength: 0)
+                if workspace.selectedIDs.isEmpty {
+                    Text("⌘클릭 추가 · ⌘드래그 구간 · ⌘C/V/D").foregroundStyle(Palette.tertiary).lineLimit(1)
+                }
             }
-        }.font(.system(size: 10)).buttonStyle(.borderless)
+        }.font(.system(size: hud ? 11 : 10)).buttonStyle(.borderless)
         .help("⌘클릭: 선택 추가/해제 · ⌘드래그: 현재 기타 구간 선택 · ⌘클릭 빈 곳: 커서 이동 · ⌘C/V/D: 복사/붙여넣기/복제")
         .disabled(!workspace.canMutateNotes)
     }
