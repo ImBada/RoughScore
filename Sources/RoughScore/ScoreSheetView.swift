@@ -105,35 +105,43 @@ struct ScoreSheetView: View {
     }
 
     private func controls(layout: ScoreLayout, page: Int) -> some View {
-        VStack(spacing: 8) {
-            HStack(spacing: 12) {
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 14) { viewOptions(layout: layout); Spacer(minLength: 8); pager(layout: layout, page: page) }
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 14) { viewOptions(layout: layout); Spacer(minLength: 0) }
+                HStack { Spacer(minLength: 0); pager(layout: layout, page: page) }
+            }
+        }.font(.system(size: 11)).toggleStyle(.checkbox).controlSize(.small)
+    }
+
+    private func viewOptions(layout: ScoreLayout) -> some View {
+        HStack(spacing: 14) {
             Picker("한 줄", selection: $workspace.measuresPerSystem) {
                 Text(layout.usesDetectedBars ? "4마디 / 줄" : "8초 / 줄").tag(4)
                 Text(layout.usesDetectedBars ? "8마디 / 줄" : "16초 / 줄").tag(8)
-            }.labelsHidden().frame(width: 110)
+            }.labelsHidden().frame(width: 104)
+                .help(layout.usesDetectedBars ? "검출된 마디에 맞춰 줄바꿈" : "분석 전 · 시간 구간으로 줄바꿈")
             Toggle("L/R 함께", isOn: $workspace.showBothLanes)
             Toggle("음표 길이", isOn: $workspace.showLengths)
             Toggle("파형", isOn: $workspace.showScoreWaveforms)
             Toggle("페이지 맞춤", isOn: $fitPage)
-            Spacer(minLength: 0)
-            }
-            HStack(spacing: 12) {
-            Text(layout.usesDetectedBars ? "검출된 마디에 맞춰 줄바꿈" : "분석 전 · 시간 구간으로 줄바꿈")
-                .font(.system(size: 10)).foregroundStyle(Palette.secondary)
-            Spacer(minLength: 0)
+        }.fixedSize()
+    }
+
+    private func pager(layout: ScoreLayout, page: Int) -> some View {
+        HStack(spacing: 8) {
             Toggle("재생 따라가기", isOn: $workspace.followScore)
                 .onChange(of: ProjectViewSetting(projectID: workspace.editorIdentity, value: workspace.followScore)) { previous, current in
                     if previous.projectID == current.projectID && current.value { workspace.followScoreCursor() }
                 }
             Button { workspace.browseScorePage(page - 1) } label: { Image(systemName: "chevron.left") }
-                .disabled(page == 0).accessibilityLabel("이전 악보 페이지").help("이전 악보 페이지")
+                .buttonStyle(.borderless).disabled(page == 0).accessibilityLabel("이전 악보 페이지").help("이전 악보 페이지")
             Picker("페이지", selection: Binding(get: { workspace.displayedScorePage }, set: { workspace.browseScorePage($0) })) {
                 ForEach(0..<layout.pageCount, id: \.self) { Text("\($0 + 1) / \(layout.pageCount) 페이지").tag($0) }
-            }.labelsHidden().frame(width: 125)
+            }.labelsHidden().frame(width: 112)
             Button { workspace.browseScorePage(page + 1) } label: { Image(systemName: "chevron.right") }
-                .disabled(page == layout.pageCount - 1).accessibilityLabel("다음 악보 페이지").help("다음 악보 페이지")
-            }
-        }.font(.system(size: 11)).toggleStyle(.checkbox)
+                .buttonStyle(.borderless).disabled(page == layout.pageCount - 1).accessibilityLabel("다음 악보 페이지").help("다음 악보 페이지")
+        }.fixedSize()
     }
 
     private func system(_ row: ScoreSystem, layout: ScoreLayout, scale: Double) -> some View {
@@ -169,8 +177,8 @@ private struct SongOverview: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack {
-                overline("SONG MAP")
-                Text("곡 전체 · 클릭해서 이동").font(.system(size: 10)).foregroundStyle(Palette.secondary)
+                Text("곡 전체").font(.system(size: 11, weight: .semibold)).foregroundStyle(Palette.tertiary)
+                    .help("곡 전체 지도 · 클릭해서 이동")
                 Spacer()
                 Text("\(workspace.project.events.count)개 메모 · \(layout.pageCount)페이지").font(.system(size: 10)).foregroundStyle(Palette.secondary)
             }

@@ -105,12 +105,13 @@ final class EditorNavigationView: NSView, NSTextFieldDelegate {
             field.delegate = self; field.navigation = self; field.identifier = .init(id)
             field.setAccessibilityLabel(name); field.placeholderString = name
             field.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
+            field.controlSize = .small; field.bezelStyle = .roundedBezel
             addSubview(field)
         }
         field(cursorField, "편집 커서 · 원곡 초", "editing-cursor")
         field(intervalField, "입력 간격 · 초", "entry-interval")
         for (button, title, id) in [(input, "TAB 입력 ⌘↵", "tab-input"), (notes, "음 목록…", "note-list"), (tuning, "튜닝 / 카포…", "editor-tuning")] {
-            button.title = title; button.bezelStyle = .rounded; button.font = .systemFont(ofSize: 11)
+            button.title = title; button.bezelStyle = .push; button.controlSize = .small; button.font = .systemFont(ofSize: 11)
             button.target = button; button.action = #selector(EditorNavigationButton.run(_:))
             button.navigation = self; button.identifier = .init(id); button.setAccessibilityLabel(title)
             addSubview(button)
@@ -119,16 +120,22 @@ final class EditorNavigationView: NSView, NSTextFieldDelegate {
         notes.invoke = { [weak self] in guard self?.live?.canEdit == true else { return }; self?.openNotes?() }
         tuning.invoke = { [weak self] in guard self?.live?.canMutateNotes == true else { return }; self?.openTuning?() }
         settings.navigation = self; settings.identifier = .init("editor-display-settings")
-        settings.setAccessibilityLabel("표시 설정"); addSubview(settings)
+        settings.setAccessibilityLabel("표시 설정"); settings.controlSize = .small; settings.font = .systemFont(ofSize: 11)
+        addSubview(settings)
         // Real named key views; bridge escape uses the endpoints below.
         for (index, control) in controls.enumerated() { control.nextKeyView = controls[(index + 1) % controls.count] }
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+    private static let widths: [CGFloat] = [104, 86, 68, 84, 54, 88]
+    private static let spacing: CGFloat = 6
+    static var preferredWidth: CGFloat { widths.reduce(0, +) + spacing * CGFloat(widths.count - 1) }
     override func layout() {
         super.layout()
-        let widths: [CGFloat] = [140, 110, 82, 100, 100, 116]
         var x: CGFloat = 0
-        for (control, width) in zip(controls, widths) { control.frame = NSRect(x: x, y: 0, width: width, height: 32); x += width + 8 }
+        let height = min(bounds.height, 24), y = (bounds.height - height) / 2
+        for (control, width) in zip(controls, Self.widths) {
+            control.frame = NSRect(x: x, y: y, width: width, height: height); x += width + Self.spacing
+        }
     }
     func update(_ workspace: Workspace) {
         self.workspace = workspace; identity = workspace.editorIdentity

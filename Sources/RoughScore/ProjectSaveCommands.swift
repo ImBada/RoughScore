@@ -18,12 +18,13 @@ struct ProjectSaveCommands: View {
 /// A native pull-down keeps the visible save choices available through AppKit actions and AX.
 struct ProjectSaveMenu: View {
     @ObservedObject var workspace: Workspace
+    var prominent = false
     var body: some View {
         BulkActionMenu(title: "다른 이름/사본", identifier: "project-save-menu", enabled: workspace.canSave, items: [
             .init(title: "다른 이름으로 저장 · 링크…", action: { workspace.saveAs() }),
             .init(title: "다른 이름으로 저장 · 오디오 포함…", action: { workspace.saveAs(format: .collected) }),
             .init(title: "사본 저장 · 링크…", action: { workspace.saveCopy() }),
             .init(title: "사본 저장 · 오디오 포함…", action: { workspace.saveCopy(format: .collected) })
-        ])
+        ], prominent: prominent, symbol: prominent ? "doc.on.doc" : nil)
     }
 }

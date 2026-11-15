@@ -57,7 +57,7 @@ struct BulkSelectionBar: View {
             }
             Spacer(minLength: 0)
             if workspace.selectedIDs.isEmpty {
-                Text("⌘클릭 추가 · ⌘드래그 구간 · ⌘C/V/D").foregroundStyle(Palette.secondary)
+                Text("⌘클릭 추가 · ⌘드래그 구간 · ⌘C/V/D").foregroundStyle(Palette.tertiary).lineLimit(1)
             }
         }.font(.system(size: 10)).buttonStyle(.borderless)
         .help("⌘클릭: 선택 추가/해제 · ⌘드래그: 현재 기타 구간 선택 · ⌘클릭 빈 곳: 커서 이동 · ⌘C/V/D: 복사/붙여넣기/복제")
@@ -70,6 +70,10 @@ struct BulkActionButton: NSViewRepresentable {
     let title: String
     let identifier: String
     let enabled: Bool
+    /// `.inline` keeps the compact selection-bar pill; `.push` is a regular small button.
+    var bezel: NSButton.BezelStyle = .inline
+    /// Take the proposed width (sidebar rows) instead of the title's intrinsic width.
+    var fill = false
     let action: () -> Void
     final class Coordinator: NSObject {
         var action: () -> Void
@@ -79,7 +83,9 @@ struct BulkActionButton: NSViewRepresentable {
     func makeCoordinator() -> Coordinator { Coordinator(action) }
     func makeNSView(context: Context) -> NSButton {
         let button = NSButton(title: title, target: context.coordinator, action: #selector(Coordinator.invoke(_:)))
-        button.bezelStyle = .inline; button.font = .systemFont(ofSize: 10)
+        button.bezelStyle = bezel
+        if bezel == .inline { button.font = .systemFont(ofSize: 10) }
+        else { button.controlSize = .small; button.font = .systemFont(ofSize: NSFont.smallSystemFontSize) }
         button.setAccessibilityLabel(title); button.identifier = NSUserInterfaceItemIdentifier(identifier)
         return button
     }
@@ -87,7 +93,9 @@ struct BulkActionButton: NSViewRepresentable {
         context.coordinator.action = action; button.isEnabled = enabled; button.title = title
     }
     func sizeThatFits(_ proposal: ProposedViewSize, nsView: NSButton, context: Context) -> CGSize? {
-        nsView.intrinsicContentSize
+        let size = nsView.intrinsicContentSize
+        guard fill, let width = proposal.width, width.isFinite else { return size }
+        return CGSize(width: max(size.width, width), height: size.height)
     }
 }
 
@@ -100,6 +108,9 @@ struct BulkActionMenu: NSViewRepresentable {
     let identifier: String
     let enabled: Bool
     let items: [Item]
+    /// Toolbar menus use the toolbar bezel and an optional SF Symbol; selection-bar menus stay compact.
+    var prominent = false
+    var symbol: String? = nil
     final class Coordinator: NSObject {
         var items: [Item] = []
         @objc func invoke(_ sender: NSMenuItem) {
@@ -111,12 +122,18 @@ struct BulkActionMenu: NSViewRepresentable {
     func updateNSView(_ button: NSPopUpButton, context: Context) {
         context.coordinator.items = items
         let menu = NSMenu()
-        menu.addItem(withTitle: title, action: nil, keyEquivalent: "")
+        let header = menu.addItem(withTitle: title, action: nil, keyEquivalent: "")
+        if let symbol { header.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil) }
         for (index, item) in items.enumerated() {
             let entry = NSMenuItem(title: item.title, action: #selector(Coordinator.invoke(_:)), keyEquivalent: "")
             entry.tag = index; entry.target = context.coordinator; menu.addItem(entry)
         }
-        button.menu = menu; button.isEnabled = enabled; button.font = .systemFont(ofSize: 10)
+        button.menu = menu; button.isEnabled = enabled
+        if prominent {
+            button.bezelStyle = .toolbar; button.controlSize = .regular; button.font = .systemFont(ofSize: 12)
+            button.imagePosition = symbol == nil ? .noImage : .imageLeading
+        }
+        else { button.font = .systemFont(ofSize: 10) }
         button.identifier = NSUserInterfaceItemIdentifier(identifier); button.setAccessibilityLabel(title)
     }
     func sizeThatFits(_ proposal: ProposedViewSize, nsView: NSPopUpButton, context: Context) -> CGSize? {
