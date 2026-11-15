@@ -158,7 +158,18 @@ struct WorkspaceView: View {
             .background(Palette.panel)
     }
 
+    /// Scrolls when its panels (L/R proposals, stem controls) outgrow the window; otherwise the
+    /// whole window layout grows and pushes the top bar off screen. The min height keeps the
+    /// stem controls pinned to the bottom when everything fits.
     private var sidebar: some View {
+        GeometryReader { proxy in
+            ScrollView(.vertical) {
+                sidebarContent.frame(minHeight: proxy.size.height, alignment: .top)
+            }.scrollIndicators(.automatic)
+        }.background(Palette.panel)
+    }
+
+    private var sidebarContent: some View {
         VStack(alignment: .leading, spacing: 22) {
             VStack(alignment: .leading, spacing: 8) {
                 overline("WORKSPACE")
@@ -212,10 +223,10 @@ struct WorkspaceView: View {
                         workspace.proposePitches(from: workspace.windowStart,
                             to: min(workspace.windowEnd, workspace.windowStart + 60))
                     }
-                    Button("코드·다성 후보 (Basic Pitch) · 현재 구간") {
+                    Button("코드·다성 후보 · 현재 구간") {
                         workspace.proposeChords(from: workspace.windowStart,
                             to: min(workspace.windowEnd, workspace.windowStart + 60))
-                    }
+                    }.help("Basic Pitch로 현재 구간의 코드·다성 음 후보를 찾습니다.")
                 }.font(.system(size: 10)).disabled(workspace.prepared == nil || workspace.analyzing || workspace.busy)
                 if !workspace.pitchProposals.isEmpty { proposalReview }
                 Text("단음은 깨끗한 단음용 · 코드 후보는 배음이 섞일 수 있음\n수락하면 잠정 음 · 리듬 없음")
@@ -231,7 +242,7 @@ struct WorkspaceView: View {
                     Button("긴 곡 데모 · 3분") { workspace.loadDemo(long: true) }
                 }
             }.font(.system(size: 10)).buttonStyle(.borderless).disabled(workspace.busy || workspace.analyzing)
-        }.padding(18).background(Palette.panel)
+        }.padding(18)
     }
 
     /// Click a row to move the cursor to its onset; 수락 inserts one tentative note (⌘Z undoes it).

@@ -58,6 +58,9 @@ struct RoughScoreApp: App {
                 }
         }
         .defaultSize(width: 1440, height: 900)
+        // Launching with a project file (Finder double-click or argv) otherwise suppresses the
+        // default window, and the queued open request only starts once the window binds.
+        .defaultLaunchBehavior(.presented)
         .commands {
             CommandGroup(replacing: .undoRedo) {
                 Button("실행 취소") { workspace.performUndo() }.keyboardShortcut("z").disabled(!workspace.canPerformUndo)
